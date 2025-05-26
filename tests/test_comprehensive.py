@@ -16,7 +16,7 @@ except ImportError:
     print("Warning: python-dotenv not available. Using environment variables directly.")
 
 from pyvnc import (
-    VNCClient, VNCConfig, connect_vnc,
+    SyncVNCClient, VNCConfig,
     Point, Rect, PointLike, RectLike,
     slice_rect, key_codes,
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT
@@ -177,7 +177,7 @@ class TestVNCIntegration(unittest.TestCase):
     
     def test_float_coordinates(self):
         """Test that relative coordinates work well with float arithmetic."""
-        with connect_vnc(self.config) as vnc:
+        with SyncVNCClient.connect(self.config) as vnc:
             rel_res = vnc.get_relative_resolution()
             
             # Verify dimensions are multiples of 100
@@ -202,7 +202,7 @@ class TestVNCIntegration(unittest.TestCase):
     
     def test_comprehensive_vnc_functionality(self):
         """Comprehensive test of all VNC functionality."""
-        with connect_vnc(self.config) as vnc:
+        with SyncVNCClient.connect(self.config) as vnc:
             # Basic connection info
             self.assertGreater(vnc.rect.width, 0)
             self.assertGreater(vnc.rect.height, 0)
@@ -210,7 +210,7 @@ class TestVNCIntegration(unittest.TestCase):
             rel_res = vnc.get_relative_resolution()
             
             # Test screenshots
-            full_screenshot = vnc.capture_full_screen()
+            full_screenshot = vnc.capture()
             self.assertEqual(len(full_screenshot.shape), 3)
             self.assertEqual(full_screenshot.shape[2], 4)  # RGBA
             self.assertEqual(full_screenshot.shape[0], vnc.rect.height)
@@ -284,13 +284,19 @@ class TestVNCIntegration(unittest.TestCase):
         try:
             from PIL import Image
             
-            with connect_vnc(self.config) as vnc:
-                screenshot = vnc.capture_full_screen()
+            with SyncVNCClient.connect(self.config) as vnc:
+                screenshot = vnc.capture()
                 
                 # Convert to PIL Image and save as PNG
                 image = Image.fromarray(screenshot, 'RGBA')
                 png_path = os.path.join(self.temp_dir, 'test_screenshot.png')
+                
+                # Also save to project root with timestamp for verification
+                import time
+                timestamp = int(time.time())
+                project_png = f'sync_screenshot_{timestamp}.png'
                 image.save(png_path, 'PNG')
+                image.save(project_png, 'PNG')
                 
                 # Verify file was created
                 self.assertTrue(os.path.exists(png_path))
@@ -310,7 +316,7 @@ class TestVNCIntegration(unittest.TestCase):
             def get_rect(self) -> Rect:
                 return Rect(10, 10, 100, 100)
         
-        with connect_vnc(self.config) as vnc:
+        with SyncVNCClient.connect(self.config) as vnc:
             # Test moving to PointLike object
             test_point = TestPoint()
             vnc.move(test_point, relative=True)
@@ -328,7 +334,7 @@ class TestErrorHandling(unittest.TestCase):
         """Test connection to non-existent server."""
         bad_config = VNCConfig(host='nonexistent.example.com', port=9999, timeout=1.0)
         with self.assertRaises(Exception):
-            connect_vnc(bad_config)
+            SyncVNCClient.connect(bad_config)
     
     def test_invalid_key_code(self):
         """Test invalid key code handling."""
@@ -337,7 +343,7 @@ class TestErrorHandling(unittest.TestCase):
             self.skipTest("VNC_PASSWORD not configured")
             
         try:
-            with connect_vnc(config) as vnc:
+            with SyncVNCClient.connect(config) as vnc:
                 with self.assertRaises(KeyError):
                     vnc.press('InvalidKeyName123')
         except Exception:
@@ -345,7 +351,7 @@ class TestErrorHandling(unittest.TestCase):
     
     def test_apple_auth_detection(self):
         """Test that Apple authentication is properly detected."""
-        from pyvnc.pyvnc import AUTH_TYPE_APPLE
+        from pyvnc import AUTH_TYPE_APPLE
         self.assertEqual(AUTH_TYPE_APPLE, 33)
 
 

@@ -1,12 +1,13 @@
 """
 pyvnc: A pure Python VNC client library.
 
-This library provides VNC client functionality for capturing screenshots
-and sending keyboard & mouse input to VNC servers.
+This library provides both synchronous and asynchronous VNC client functionality 
+for capturing screenshots and sending keyboard & mouse input to VNC servers.
 
-Quick Start::
+Synchronous Quick Start::
 
-    from pyvnc import connect_vnc, VNCConfig, Point, Rect
+    from pyvnc import SyncVNCClient, VNCConfig, Point, Rect
+    from PIL import Image
 
     # Configure connection
     config = VNCConfig(
@@ -16,9 +17,13 @@ Quick Start::
     )
 
     # Connect and interact with VNC server
-    with connect_vnc(config) as vnc:
+    with SyncVNCClient.connect(config) as vnc:
         # Take screenshots
-        screenshot = vnc.capture_full_screen()
+        screenshot = vnc.capture()
+        
+        # Save as PNG using PIL
+        image = Image.fromarray(screenshot, 'RGBA')
+        image.save('screenshot.png')
         
         # Move mouse and click
         vnc.move(Point(100, 200))
@@ -37,6 +42,50 @@ Quick Start::
         # Drag operations
         with vnc.hold_mouse(MOUSE_BUTTON_LEFT):
             vnc.move(Point(500, 600))  # Drag from current to new position
+
+Asynchronous Quick Start::
+
+    import asyncio
+    from pyvnc import AsyncVNCClient, VNCConfig, Point, Rect
+    from PIL import Image
+
+    async def main():
+        # Configure connection
+        config = VNCConfig(
+            host='localhost',
+            port=5900,
+            password='your_password'
+        )
+
+        # Connect and interact with VNC server
+        vnc = await AsyncVNCClient.connect(config)
+        async with vnc:
+            # Take screenshots
+            screenshot = await vnc.capture()
+            
+            # Save as PNG using PIL (Note: PIL is sync, wrap in asyncio.to_thread if needed)
+            image = Image.fromarray(screenshot, 'RGBA')
+            image.save('async_screenshot.png')
+            
+            # Move mouse and click
+            await vnc.move(Point(100, 200))
+            await vnc.click(MOUSE_BUTTON_LEFT)  # Left click
+            await vnc.click(MOUSE_BUTTON_MIDDLE)  # Middle click
+            await vnc.click(MOUSE_BUTTON_RIGHT)  # Right click
+            
+            # Type text  
+            await vnc.write('Hello Async VNC!')
+            await vnc.press('Return')
+            
+            # Hold keys for combinations
+            async with vnc.hold_key('Ctrl'):
+                await vnc.press('c')  # Ctrl+C
+            
+            # Drag operations
+            async with vnc.hold_mouse(MOUSE_BUTTON_LEFT):
+                await vnc.move(Point(500, 600))  # Drag from current to new position
+
+    asyncio.run(main())
 
 Relative Coordinates:
     pyvnc provides a resolution-independent coordinate system:
@@ -59,41 +108,8 @@ Authentication:
     Apple Remote Desktop auth raises NotImplementedError with helpful message.
 """
 
-from .pyvnc import (
-    VNCClient,
-    VNCConfig,
-    connect_vnc,
-    Point,
-    Rect,
-    PointLike,
-    RectLike,
-    slice_rect,
-    key_codes,
-    # Mouse button constants
-    MOUSE_BUTTON_LEFT,
-    MOUSE_BUTTON_MIDDLE,
-    MOUSE_BUTTON_RIGHT,
-    MOUSE_BUTTON_SCROLL_UP,
-    MOUSE_BUTTON_SCROLL_DOWN,
-    # Backwards compatibility
-    VNC,
-)
+from .pyvnc_common import *
+from .pyvnc_sync import *
+from .pyvnc_async import *
 
 __version__ = "2.0.0"
-__all__ = [
-    "VNCClient",
-    "VNCConfig", 
-    "connect_vnc",
-    "Point",
-    "Rect",
-    "PointLike",
-    "RectLike",
-    "slice_rect",
-    "key_codes",
-    "MOUSE_BUTTON_LEFT",
-    "MOUSE_BUTTON_MIDDLE", 
-    "MOUSE_BUTTON_RIGHT",
-    "MOUSE_BUTTON_SCROLL_UP",
-    "MOUSE_BUTTON_SCROLL_DOWN",
-    "VNC",
-]

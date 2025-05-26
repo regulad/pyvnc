@@ -6,13 +6,14 @@ Basic syntax and import tests for pyvnc library.
 import sys
 
 def test_syntax():
-    """Test that the main module has valid syntax."""
+    """Test that the main modules have valid syntax."""
     try:
         import ast
-        with open('pyvnc/pyvnc.py', 'r') as f:
-            source = f.read()
-        ast.parse(source)
-        print("✓ Main module syntax is valid")
+        for module_file in ['pyvnc/pyvnc_sync.py', 'pyvnc/pyvnc_common.py']:
+            with open(module_file, 'r') as f:
+                source = f.read()
+            ast.parse(source)
+        print("✓ Main modules syntax is valid")
         return True
     except Exception as e:
         print(f"✗ Syntax error: {e}")
@@ -40,7 +41,7 @@ def test_basic_imports():
 def test_constants_and_types():
     """Test that constants and types are properly defined."""
     try:
-        from pyvnc.pyvnc import (
+        from pyvnc import (
             VNC_PROTOCOL_VERSION, VNC_PROTOCOL_HEADER_SIZE, VNC_PROTOCOL_PREFIX,
             AUTH_TYPE_NONE, AUTH_TYPE_VNC, AUTH_TYPE_APPLE,
             MSG_TYPE_FRAMEBUFFER_UPDATE, MSG_TYPE_CLIPBOARD,
@@ -72,7 +73,7 @@ def test_constants_and_types():
 def test_vnc_config():
     """Test VNCConfig without external dependencies."""
     try:
-        from pyvnc.pyvnc import VNCConfig
+        from pyvnc import VNCConfig
         
         # Test default config
         config = VNCConfig()
@@ -102,7 +103,7 @@ def test_vnc_config():
 def test_interfaces():
     """Test PointLike and RectLike interfaces."""
     try:
-        from pyvnc.pyvnc import Point, Rect, PointLike, RectLike
+        from pyvnc import Point, Rect, PointLike, RectLike
         
         class TestPoint(PointLike):
             def get_point(self) -> Point:
@@ -129,13 +130,13 @@ def test_interfaces():
 def test_relative_coordinates():
     """Test relative coordinate calculations."""
     try:
-        from pyvnc.pyvnc import VNCClient, Point, Rect
+        from pyvnc import SyncVNCClient, Point, Rect
         from socket import socket
         from zlib import decompressobj
         
-        # Create a mock VNCClient for testing coordinate conversion
+        # Create a mock SyncVNCClient for testing coordinate conversion
         mock_sock = socket()
-        mock_client = VNCClient(
+        mock_client = SyncVNCClient(
             sock=mock_sock,
             decompress=decompressobj().decompress,
             rect=Rect(0, 0, 1920, 1080)  # 16:9 1920x1080 screen
@@ -178,7 +179,7 @@ def test_relative_coordinates():
 def test_error_detection():
     """Test that Apple authentication error is properly defined."""
     try:
-        from pyvnc.pyvnc import AUTH_TYPE_APPLE
+        from pyvnc import AUTH_TYPE_APPLE
         assert AUTH_TYPE_APPLE == 33
         print("✓ Apple authentication detection constant defined")
         return True
