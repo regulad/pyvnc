@@ -4,13 +4,6 @@ pyvnc: capture screen and send keyboard & mouse
 .. image:: https://img.shields.io/badge/source-github-orange
     :target: https://github.com/regulad/pyvnc
 
-.. note::
-   This library was originally pytest-vnc and has been transformed into a standalone
-   VNC client library with significant contributions from Claude AI (Anthropic).
-
-.. image:: https://img.shields.io/pypi/v/pyvnc?style=flat-square
-    :target: https://pypi.org/project/pyvnc
-
 
 pyvnc implements both synchronous and asynchronous VNC clients in pure Python. It works on Mac, Linux and Windows. Use it to
 capture screenshots and send keyboard & mouse input to VNC servers:
