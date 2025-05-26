@@ -2,6 +2,11 @@
 test_*.png
 test_screenshots/
 
+# Test environment variables
+.env
+.env.local
+.env.test
+
 # Python
 __pycache__/
 *.py[cod]

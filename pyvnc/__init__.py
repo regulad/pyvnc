@@ -26,16 +26,25 @@ Quick Start::
         vnc.click(MOUSE_BUTTON_MIDDLE)  # Middle click
         vnc.click(MOUSE_BUTTON_RIGHT)  # Right click
         
-        # Type text
+        # Type text  
         vnc.write('Hello VNC!')
         vnc.press('Return')
+        
+        # Hold keys for combinations
+        with vnc.hold_key('Ctrl'):
+            vnc.press('c')  # Ctrl+C
+        
+        # Drag operations
+        with vnc.hold_mouse(MOUSE_BUTTON_LEFT):
+            vnc.move(Point(500, 600))  # Drag from current to new position
 
 Relative Coordinates:
     pyvnc provides a resolution-independent coordinate system:
-    - Height is always 900 in relative coordinates
-    - Width scales proportionally based on aspect ratio
-    - 16:9 screens → 1600×900 relative coordinates
+    - Automatically scales to maintain aspect ratio close to actual screen
+    - Both width and height are multiples of 100 (easy mental math)
+    - Maximum dimensions are 99900 (for any aspect ratio)
     - Use relative=True parameter in mouse/capture methods
+    - Get dimensions with vnc.get_relative_resolution()
 
 Mouse Button Constants:
     Use these constants instead of raw numbers:

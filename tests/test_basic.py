@@ -78,7 +78,6 @@ def test_vnc_config():
         config = VNCConfig()
         assert config.host == 'localhost'
         assert config.port == 5900
-        assert config.speed == 20.0
         assert config.timeout == 5.0
         assert config.pixel_format == 'rgba'
         assert config.username is None
@@ -139,31 +138,36 @@ def test_relative_coordinates():
         mock_client = VNCClient(
             sock=mock_sock,
             decompress=decompressobj().decompress,
-            speed=20.0,
             rect=Rect(0, 0, 1920, 1080)  # 16:9 1920x1080 screen
         )
         
         # Test relative resolution calculation
         rel_res = mock_client.get_relative_resolution()
-        expected_rel_width = int((1920 / 1080) * 900)  # Should be 1600 for 16:9
-        assert rel_res.x == expected_rel_width
-        assert rel_res.y == 900
+        # For 1920x1080 (16:9), width > height, so width should be 99900
+        assert rel_res.x == 99900
+        expected_rel_height = int(99900 / (1920 / 1080))  # Should be ~56200 (rounded down to multiple of 100)
+        expected_rel_height = (expected_rel_height // 100) * 100
+        assert rel_res.y == expected_rel_height
+        
+        # Verify both dimensions are multiples of 100
+        assert rel_res.x % 100 == 0
+        assert rel_res.y % 100 == 0
         
         # Test point conversion
-        rel_point = Point(800, 450)  # Center of relative coords
+        rel_point = Point(rel_res.x // 2, rel_res.y // 2)  # Center of relative coords
         abs_point = mock_client._convert_relative_point(rel_point)
-        expected_x = int((800 / expected_rel_width) * 1920)
-        expected_y = int((450 / 900) * 1080)
+        expected_x = int((rel_point.x / rel_res.x) * 1920)
+        expected_y = int((rel_point.y / rel_res.y) * 1080)
         assert abs_point.x == expected_x
         assert abs_point.y == expected_y
         
         # Test rect conversion
-        rel_rect = Rect(100, 100, 200, 200)
+        rel_rect = Rect(rel_res.x // 4, rel_res.y // 4, rel_res.x // 4, rel_res.y // 4)
         abs_rect = mock_client._convert_relative_rect(rel_rect)
-        assert abs_rect.x == int((100 / expected_rel_width) * 1920)
-        assert abs_rect.y == int((100 / 900) * 1080)
-        assert abs_rect.width == int((200 / expected_rel_width) * 1920)
-        assert abs_rect.height == int((200 / 900) * 1080)
+        assert abs_rect.x == int((rel_rect.x / rel_res.x) * 1920)
+        assert abs_rect.y == int((rel_rect.y / rel_res.y) * 1080)
+        assert abs_rect.width == int((rel_rect.width / rel_res.x) * 1920)
+        assert abs_rect.height == int((rel_rect.height / rel_res.y) * 1080)
         
         print(f"✓ Relative coordinates work (relative res: {rel_res.x}x{rel_res.y})")
         return True

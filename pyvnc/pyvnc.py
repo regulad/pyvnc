@@ -5,7 +5,6 @@ from contextlib import contextmanager, ExitStack
 from collections import namedtuple
 from dataclasses import dataclass, field
 from socket import socket, create_connection
-from time import sleep
 from typing import Callable, Dict, Optional, Union, Set, Tuple, Iterator
 from zlib import decompressobj
 
@@ -121,7 +120,6 @@ class VNCConfig:
     """Configuration for VNC connection."""
     host: str = 'localhost'
     port: int = 5900
-    speed: float = 20.0
     timeout: float = 5.0
     pixel_format: str = 'rgba'
     username: Optional[str] = None
@@ -204,7 +202,7 @@ def connect_vnc(config: Optional[VNCConfig] = None) -> 'VNCClient':
                  b'\x02\x00' + len(encodings).to_bytes(2, 'big') +
                  b''.join(encoding.to_bytes(4, 'big') for encoding in encodings))
     
-    return VNCClient(sock, decompressobj().decompress, config.speed, rect)
+    return VNCClient(sock, decompressobj().decompress, rect)
 
 
 @dataclass
@@ -214,7 +212,6 @@ class VNCClient:
     """
     sock: socket = field(repr=False)
     decompress: Callable[[bytes], bytes] = field(repr=False)
-    speed: float
     rect: Rect
     mouse_position: Point = Point(0, 0)
     mouse_buttons: int = 0
@@ -233,50 +230,60 @@ class VNCClient:
     def _write_key(self, key: str) -> Iterator['VNCClient']:
         data = key_codes[key].to_bytes(4, 'big')
         self.sock.sendall(b'\x04\x01\x00\x00' + data)
-        self.sleep(1.0 / self.speed)
         try:
             yield
         finally:
             self.sock.sendall(b'\x04\x00\x00\x00' + data)
-            self.sleep(1.0 / self.speed)
-
+    
     def _write_mouse(self) -> None:
         self.sock.sendall(
             b'\x05' +
             self.mouse_buttons.to_bytes(1, 'big') +
             self.mouse_position.x.to_bytes(2, 'big') +
             self.mouse_position.y.to_bytes(2, 'big'))
-        self.sleep(1.0 / self.speed)
-
-    @classmethod
-    def sleep(cls, duration: float) -> None:
-        sleep(duration)
 
     def get_relative_resolution(self) -> Point:
         """
         Get the relative coordinate resolution based on screen aspect ratio.
         
-        For 16:9 screens: 1600x900
-        For 31:9 screens: 3100x900  
-        For other ratios: scales proportionally with height=900
+        This method creates a coordinate system where both width and height are
+        multiples of 100 (for easy mental math), neither exceeds 99900, and the
+        aspect ratio closely matches the actual screen.
+        
+        The relative coordinate system allows you to write resolution-independent
+        automation scripts. Use relative=True parameter in mouse and capture 
+        methods to work with these coordinates:
+        
+        Examples:
+            # Get relative dimensions - always multiples of 100
+            rel_res = vnc.get_relative_resolution()  # e.g., Point(99900, 56200) for 16:9
+            center_x, center_y = rel_res.x // 2, rel_res.y // 2  # Easy mental math
+            
+            # Use relative coordinates
+            vnc.move(Point(center_x, center_y), relative=True)
+            vnc.capture(Rect(0, 0, rel_res.x//2, rel_res.y//2), relative=True)
         
         Returns:
-            Point with relative resolution dimensions.
+            Point with relative resolution dimensions (both multiples of 100, ≤ 99900).
         """
         aspect_ratio = self.rect.width / self.rect.height
-        relative_height = 900
-        relative_width = int(aspect_ratio * relative_height)
-        return Point(relative_width, relative_height)
-
-    def get_relative_screen_rect(self) -> Rect:
-        """
-        Get the entire screen as a relative coordinate rect.
         
-        Returns:
-            Rect representing the entire screen in relative coordinates (0, 0, width, height).
-        """
-        rel_res = self.get_relative_resolution()
-        return Rect(0, 0, rel_res.x, rel_res.y)
+        # Find the largest dimensions where both width and height ≤ 99900 and are multiples of 100
+        # This ensures clean float division and 5 digits max
+        max_dimension = 99900  # Multiple of 100, 5 digits
+        
+        if aspect_ratio >= 1.0:  # Width >= height
+            relative_width = max_dimension
+            relative_height = int(max_dimension / aspect_ratio)
+            # Round down to nearest multiple of 100
+            relative_height = (relative_height // 100) * 100
+        else:  # Height > width
+            relative_height = max_dimension
+            relative_width = int(max_dimension * aspect_ratio)
+            # Round down to nearest multiple of 100
+            relative_width = (relative_width // 100) * 100
+        
+        return Point(relative_width, relative_height)
 
     def _convert_relative_point(self, point: Union[Point, PointLike]) -> Point:
         """Convert relative coordinates to absolute pixel coordinates."""
@@ -360,7 +367,7 @@ class VNCClient:
                 raise ValueError(f'unsupported VNC update type: {update_type}')
 
     @contextmanager
-    def hold(self, *keys: str) -> Iterator['VNCClient']:
+    def hold_key(self, *keys: str) -> Iterator['VNCClient']:
         """
         Context manager that pushes the given keys on enter, and releases them (in reverse order) on exit.
         """
@@ -373,7 +380,7 @@ class VNCClient:
         """
         Pushes all the given keys, and then releases them in reverse order.
         """
-        with self.hold(*keys):
+        with self.hold_key(*keys):
             pass
         return self
 
@@ -382,17 +389,20 @@ class VNCClient:
         Pushes and releases each of the given keys, one after the other.
         """
         for key in text:
-            with self.hold(key):
+            with self.hold_key(key):
                 pass
         return self
 
     @contextmanager
-    def drag(self, button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> Iterator['VNCClient']:
+    def hold_mouse(self, button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> Iterator['VNCClient']:
         """
-        Context manager that presses a mouse button on enter, and releases it on exit.
+        Context manager that holds down a mouse button for dragging operations.
+        
+        The button is pressed on enter and released on exit. Move the mouse while
+        in this context to perform drag operations.
         
         Args:
-            button: Mouse button to drag with. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
+            button: Mouse button to hold down. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
                    or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
             relative: If True, use relative coordinates for mouse operations within context.
         """
@@ -419,7 +429,7 @@ class VNCClient:
                    or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
             relative: If True, use relative coordinates for current position.
         """
-        with self.drag(button, relative=relative):
+        with self.hold_mouse(button, relative=relative):
             pass
         return self
 

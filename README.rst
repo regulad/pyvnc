@@ -4,6 +4,10 @@ pyvnc: capture screen and send keyboard & mouse
 .. image:: https://img.shields.io/badge/source-github-orange
     :target: https://github.com/barneygale/pytest-vnc
 
+.. note::
+   This library was originally pytest-vnc and has been transformed into a standalone
+   VNC client library with significant contributions from Claude AI (Anthropic).
+
 .. image:: https://img.shields.io/pypi/v/pyvnc?style=flat-square
     :target: https://pypi.org/project/pyvnc
 
@@ -16,7 +20,7 @@ to create a standalone, production-ready VNC client library.
 
 .. code-block:: python
 
-    from pyvnc import connect_vnc, VNCConfig, Rect, Point
+    from pyvnc import connect_vnc, VNCConfig, Rect, Point, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT
 
     # Connect to VNC server
     config = VNCConfig(host='localhost', port=5900, password='secret')
@@ -31,23 +35,21 @@ to create a standalone, production-ready VNC client library.
         # Keyboard input
         vnc.write('hi there!')  # keys are queued
         vnc.press('Ctrl', 'c')  # keys are stacked
-        with vnc.hold('Ctrl'):
+        with vnc.hold_key('Ctrl'):
             vnc.press('Esc')
 
         # Mouse input
         vnc.move(Point(100, 200))
-        vnc.click()
-        vnc.double_click()
-        vnc.middle_click()
-        vnc.right_click()
+        vnc.click(MOUSE_BUTTON_LEFT)
+        vnc.double_click(MOUSE_BUTTON_LEFT)
+        vnc.click(MOUSE_BUTTON_MIDDLE)
+        vnc.click(MOUSE_BUTTON_RIGHT)
         vnc.scroll_up()
         vnc.scroll_down(repeat=10)
-        with vnc.drag():
-            vnc.move(Point(300, 400))
-        with vnc.middle_drag():
-            vnc.move(Point(500, 600))
-        with vnc.right_drag():
-            vnc.move(Point(700, 800))
+        with vnc.hold_mouse():
+            vnc.move(Point(300, 400))  # Drag with left button
+        with vnc.hold_mouse(MOUSE_BUTTON_RIGHT):
+            vnc.move(Point(500, 600))  # Drag with right button
 
 
 Installation
@@ -72,16 +74,31 @@ Create a VNCConfig object to specify connection parameters:
     config = VNCConfig(
         host='localhost',        # VNC hostname (default: localhost)
         port=5900,              # VNC port (default: 5900)
-        speed=20.0,             # Interactions per second (default: 20)
         timeout=5.0,            # Connection timeout in seconds (default: 5)
         pixel_format='rgba',    # Colour channel order (default: rgba)
-        username='user',        # VNC username (default: env: PYVNC_USER or current user)
-        password='secret'       # VNC password (default: env: PYVNC_PASSWD)
+        username='user',        # VNC username (optional)
+        password='secret'       # VNC password (optional)
     )
 
-The following attributes can be set on the VNCClient object:
 
-``speed``
-  Interactions per second (default: 20)
-``sleep``
-  Callable that accepts a duration in seconds and waits for that long (default: ``time.sleep()``)
+Testing
+-------
+
+For development and testing, create a ``.env`` file in the project root::
+
+    # Test VNC Server Configuration
+    VNC_HOST=localhost
+    VNC_PORT=5900
+    VNC_PASSWORD=your_password_here
+    # Optional: VNC_USERNAME=your_username
+
+Run tests::
+
+    # Install test dependencies
+    pip install pyvnc[test]
+    
+    # Run basic tests (no VNC server required)
+    python tests/test_basic.py
+    
+    # Run comprehensive test suite (includes integration tests)
+    python tests/test_comprehensive.py

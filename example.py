@@ -50,7 +50,7 @@ def main():
             vnc.scroll_down(2)
             
             # Drag operations
-            with vnc.drag():
+            with vnc.hold_mouse():
                 vnc.move(Point(500, 600))
             
             print("VNC operations completed successfully!")
