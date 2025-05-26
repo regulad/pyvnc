@@ -1,22 +1,26 @@
-pytest-vnc: capture screen and send keyboard & mouse
-====================================================
+pyvnc: capture screen and send keyboard & mouse
+===============================================
 
 .. image:: https://img.shields.io/badge/source-github-orange
     :target: https://github.com/barneygale/pytest-vnc
 
-.. image:: https://img.shields.io/pypi/v/pytest-vnc?style=flat-square
-    :target: https://pypi.org/project/pytest-vnc
+.. image:: https://img.shields.io/pypi/v/pyvnc?style=flat-square
+    :target: https://pypi.org/project/pyvnc
 
 
-pytest-vnc implements a VNC client in pure Python. It works on Mac, Linux and Windows. Use the ``vnc`` fixture to
-capture screenshots and send keyboard & mouse from your pytest tests:
+pyvnc implements a VNC client in pure Python. It works on Mac, Linux and Windows. Use it to
+capture screenshots and send keyboard & mouse input to VNC servers:
+
+**Note**: This library was transformed from pytest-vnc with significant contributions from Claude AI (Anthropic)
+to create a standalone, production-ready VNC client library.
 
 .. code-block:: python
 
-    from pytest_vnc import Rect, Point
+    from pyvnc import connect_vnc, VNCConfig, Rect, Point
 
-
-    def test_thing(vnc):
+    # Connect to VNC server
+    config = VNCConfig(host='localhost', port=5900, password='secret')
+    with connect_vnc(config) as vnc:
         # Screenshot
         print(vnc.rect.width, vnc.rect.height)
         pixels = vnc.capture()  # rgba numpy array of entire screen
@@ -49,34 +53,33 @@ capture screenshots and send keyboard & mouse from your pytest tests:
 Installation
 ------------
 
-This package requires Python 3.7+.
+This package requires Python 3.9+.
 
-Install pytest-vnc by running::
+Install pyvnc by running::
 
-    pip install pytest-vnc
+    pip install pyvnc
 
 
 Configuration
 -------------
 
-The following configuration options can be set in ``pytest.ini``:
+Create a VNCConfig object to specify connection parameters:
 
-``vnc_host``
-  VNC hostname (default: localhost)
-``vnc_port``
-  VNC port (default: 5900)
-``vnc_speed``
-  VNC interactions per second (default: 20)
-``vnc_timeout``
-  VNC connection timeout in seconds (default: 5)
-``vnc_pixel_format``
-  VNC colour channel order (default: rgba)
-``vnc_user``
-  VNC username (default: env var: ``PYTEST_VNC_USER`` or current user)
-``vnc_passwd``
-  VNC password (default: env var: ``PYTEST_VNC_PASSWD``)
+.. code-block:: python
 
-The following attributes can be set on the ``vnc`` object:
+    from pyvnc import VNCConfig
+
+    config = VNCConfig(
+        host='localhost',        # VNC hostname (default: localhost)
+        port=5900,              # VNC port (default: 5900)
+        speed=20.0,             # Interactions per second (default: 20)
+        timeout=5.0,            # Connection timeout in seconds (default: 5)
+        pixel_format='rgba',    # Colour channel order (default: rgba)
+        username='user',        # VNC username (default: env: PYVNC_USER or current user)
+        password='secret'       # VNC password (default: env: PYVNC_PASSWD)
+    )
+
+The following attributes can be set on the VNCClient object:
 
 ``speed``
   Interactions per second (default: 20)
