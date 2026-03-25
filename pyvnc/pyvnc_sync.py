@@ -136,7 +136,7 @@ def _sync_connect_vnc(config: Optional[VNCConfig] = None) -> 'SyncVNCClient':
                  b'\x02\x00' + len(encodings).to_bytes(2, 'big') +
                  b''.join(encoding.to_bytes(4, 'big') for encoding in encodings))
     
-    return SyncVNCClient(sock, decompressobj().decompress, rect)
+    return SyncVNCClient(sock, decompressobj().decompress, rect, intro)
 
 
 class SyncVNCClient(CommonVNCClient):
@@ -144,10 +144,11 @@ class SyncVNCClient(CommonVNCClient):
     A synchronous VNC client.
     """
     
-    def __init__(self, sock: socket, decompress: Callable[[bytes], bytes], rect: Rect):
+    def __init__(self, sock: socket, decompress: Callable[[bytes], bytes], rect: Rect, intro: str):
         super().__init__(rect)
         self.sock = sock
         self.decompress = decompress
+        self.intro = intro
 
     @classmethod
     def connect(cls, config: Optional[VNCConfig] = None) -> 'SyncVNCClient':

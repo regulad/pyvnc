@@ -150,7 +150,7 @@ async def _async_connect_vnc(config: Optional[VNCConfig] = None) -> 'AsyncVNCCli
                  b''.join(encoding.to_bytes(4, 'big') for encoding in encodings))
     await writer.drain()
     
-    return AsyncVNCClient(reader, writer, decompressobj().decompress, rect)
+    return AsyncVNCClient(reader, writer, decompressobj().decompress, rect, intro)
 
 
 class AsyncVNCClient(CommonVNCClient):
@@ -159,11 +159,12 @@ class AsyncVNCClient(CommonVNCClient):
     """
     
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, 
-                 decompress: Callable[[bytes], bytes], rect: Rect):
+                 decompress: Callable[[bytes], bytes], rect: Rect, intro: str):
         super().__init__(rect)
         self.reader = reader
         self.writer = writer
         self.decompress = decompress
+        self.intro = intro
 
     @classmethod
     async def connect(cls, config: Optional[VNCConfig] = None) -> 'AsyncVNCClient':
