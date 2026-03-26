@@ -24,7 +24,11 @@
       "Bash(RUFF_DEBUG=1 .venv/Scripts/ruff check pyvnc/pyvnc_async.py --select E501)",
       "WebSearch",
       "mcp__ddg-search__search",
-      "mcp__ddg-search__fetch_content"
+      "mcp__ddg-search__fetch_content",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m py_compile pyvnc/pyvnc_async.py)",
+      "Bash(python -m py_compile pyvnc/pyvnc_common.py)",
+      "Bash(python:*)"
     ]
   }
 }

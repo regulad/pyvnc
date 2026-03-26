@@ -185,6 +185,15 @@ class VNCConfig:
     username: Optional[str] = None
     password: Optional[str] = None
 
+    # Retry configuration
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    retry_backoff: float = 2.0
+
+    # Reconnection configuration
+    auto_reconnect: bool = True
+    reconnect_delay: float = 2.0
+
 
 __all__ = [
     # Constants
