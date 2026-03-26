@@ -10,20 +10,29 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from dataclasses import astuple
+from struct import unpack, pack
+from typing import Dict, Optional, Self, Tuple
+
+from frozendict import frozendict
 
 from keysymdef import keysymdef  # type: ignore
 
 
 # Constants
-VNC_PROTOCOL_VERSION = b"RFB 003.008\n"
-VNC_PROTOCOL_HEADER_SIZE = 12
+VNC_PROTOCOL_HEADER = b"RFB 003.008\n"
+VNC_PROTOCOL_HEADER_SIZE = len(VNC_PROTOCOL_HEADER)
 VNC_PROTOCOL_PREFIX = b"RFB "
 
 # Authentication types
 AUTH_TYPE_NONE = 1
 AUTH_TYPE_VNC = 2
 AUTH_TYPE_APPLE = 33
+
+# Authentication response codes
+AUTH_STATE_PERMITTED = 0
+AUTH_STATE_FAILED = 1
+AUTH_STATE_LOCKOUT = 2
 
 # VNC message types
 MSG_TYPE_FRAMEBUFFER_UPDATE = 0
@@ -41,30 +50,75 @@ MOUSE_BUTTON_SCROLL_UP = 3
 MOUSE_BUTTON_SCROLL_DOWN = 4
 
 # Keyboard keys
-key_codes: Dict[str, int] = {}
-key_codes.update((name, code) for name, code, char in keysymdef)
-key_codes.update((chr(char), code) for name, code, char in keysymdef if char)
-key_codes["Del"] = key_codes["Delete"]
-key_codes["Esc"] = key_codes["Escape"]
-key_codes["Cmd"] = key_codes["Super_L"]
-key_codes["Alt"] = key_codes["Alt_L"]
-key_codes["Ctrl"] = key_codes["Control_L"]
-key_codes["Super"] = key_codes["Super_L"]
-key_codes["Shift"] = key_codes["Shift_L"]
-key_codes["Backspace"] = key_codes["BackSpace"]
-key_codes["Space"] = key_codes["space"]
+_key_codes_mut: Dict[str, int] = {}
+_key_codes_mut.update((name, code) for name, code, char in keysymdef)
+_key_codes_mut.update((chr(char), code) for name, code, char in keysymdef if char)
+_key_codes_mut["Del"] = _key_codes_mut["Delete"]
+_key_codes_mut["Esc"] = _key_codes_mut["Escape"]
+_key_codes_mut["Cmd"] = _key_codes_mut["Super_L"]
+_key_codes_mut["Alt"] = _key_codes_mut["Alt_L"]
+_key_codes_mut["Ctrl"] = _key_codes_mut["Control_L"]
+_key_codes_mut["Super"] = _key_codes_mut["Super_L"]
+_key_codes_mut["Shift"] = _key_codes_mut["Shift_L"]
+_key_codes_mut["Backspace"] = _key_codes_mut["BackSpace"]
+_key_codes_mut["Space"] = _key_codes_mut["space"]
+key_codes = frozendict(_key_codes_mut)
+del _key_codes_mut
 
-encodings: Set[int] = {
-    ENCODING_ZLIB,
-}
 
 # Colour channel orders
-pixel_formats: Dict[str, bytes] = {
-    "bgra": b"\x20\x18\x00\x01\x00\xff\x00\xff\x00\xff\x10\x08\x00\x00\x00\x00",
-    "rgba": b"\x20\x18\x00\x01\x00\xff\x00\xff\x00\xff\x00\x08\x10\x00\x00\x00",
-    "argb": b"\x20\x18\x01\x01\x00\xff\x00\xff\x00\xff\x10\x08\x00\x00\x00\x00",
-    "abgr": b"\x20\x18\x01\x01\x00\xff\x00\xff\x00\xff\x00\x08\x10\x00\x00\x00",
-}
+@dataclass
+class PixelFormat:
+    bits_per_pixel: int
+    depth: int
+    big_endian_flag: bool
+    true_color_flag: bool
+    red_max: int
+    green_max: int
+    blue_max: int
+    red_shift: int
+    green_shift: int
+    blue_shift: int
+
+    PYTHON_STRUCT_PIXEL_FORMAT = (
+        "!"  # big-endian marker
+        "B"
+        "B"
+        "?"
+        "?"
+        "H"
+        "H"
+        "H"
+        "B"
+        "B"
+        "B"
+        "3x"
+    )
+
+    @classmethod
+    def deserialize(cls, pf_bytes: bytes) -> Self:
+        return cls(*unpack(cls.PYTHON_STRUCT_PIXEL_FORMAT, pf_bytes))
+
+    def serialize(self) -> bytes:
+        return pack(self.PYTHON_STRUCT_PIXEL_FORMAT, *astuple(self))
+
+
+PIXEL_FORMATS = frozendict(
+    {
+        "bgra": PixelFormat.deserialize(
+            b"\x20\x18\x00\x01\x00\xff\x00\xff\x00\xff\x10\x08\x00\x00\x00\x00"
+        ),
+        "rgba": PixelFormat.deserialize(
+            b"\x20\x18\x00\x01\x00\xff\x00\xff\x00\xff\x00\x08\x10\x00\x00\x00"
+        ),
+        "argb": PixelFormat.deserialize(
+            b"\x20\x18\x01\x01\x00\xff\x00\xff\x00\xff\x10\x08\x00\x00\x00\x00"
+        ),
+        "abgr": PixelFormat.deserialize(
+            b"\x20\x18\x01\x01\x00\xff\x00\xff\x00\xff\x00\x08\x10\x00\x00\x00"
+        ),
+    }
+)
 
 
 # Point with x, y coordinates (int or float)
@@ -96,34 +150,45 @@ def slice_rect(rect: Rect, *channels: slice) -> Tuple[slice, ...]:
     ) + channels
 
 
+# no type for a byte string of a particular length
+# see https://github.com/python/typing/issues/997
+def pack_apple_remote_desktop(material: str) -> bytes:
+    """
+    Wraps a component of key material for use in Apple Remote Desktop (ARD) authentication.
+    """
+
+    material_cstr_bytes = material.encode("utf-8") + b"\x00"
+    material_cstr_bytes_len_wterminator = len(material_cstr_bytes)
+
+    # if the cstring is greater than 64 bytes in length, truncate
+    if material_cstr_bytes_len_wterminator > 64:
+        truncated_material = material_cstr_bytes[:64]
+        assert len(truncated_material) == 64
+        return truncated_material
+    else:
+        padding_bytes_needed = 64 - material_cstr_bytes_len_wterminator
+        # while pytest-vnc (the library from which much of this library is adapted from)
+        # uses random bytes to pad the credential to 64 bytes, this is actually unnecessary
+        # since the entire key is only used once to encrypt a single block
+        material_cstr_bytes += b"\x00" * padding_bytes_needed
+        assert len(material_cstr_bytes) == 64
+        return material_cstr_bytes
+
+
 @dataclass
 class VNCConfig:
     """Configuration for VNC connection."""
 
     host: str = "localhost"
     port: int = 5900
-    timeout: float = 5.0
-    pixel_format: str = "rgba"
+    connection_timeout: float = 5.0
     username: Optional[str] = None
     password: Optional[str] = None
 
 
-class CommonVNCClient(ABC):
-    """
-    Abstract base class for VNC clients with shared functionality.
-
-    This class contains shared attributes for VNC client implementations.
-    """
-
-    def __init__(self, rect: Rect):
-        self.rect = rect
-        self.mouse_position: Point = Point(0, 0)
-        self.mouse_buttons: int = 0
-
-
 __all__ = [
     # Constants
-    "VNC_PROTOCOL_VERSION",
+    "VNC_PROTOCOL_HEADER",
     "VNC_PROTOCOL_HEADER_SIZE",
     "VNC_PROTOCOL_PREFIX",
     "AUTH_TYPE_NONE",
@@ -138,16 +203,18 @@ __all__ = [
     "MOUSE_BUTTON_RIGHT",
     "MOUSE_BUTTON_SCROLL_UP",
     "MOUSE_BUTTON_SCROLL_DOWN",
+    "AUTH_STATE_PERMITTED",
+    "AUTH_STATE_FAILED",
+    "AUTH_STATE_LOCKOUT",
     # Data structures
     "Point",
     "Rect",
     "PointLike",
     "RectLike",
     "VNCConfig",
-    "CommonVNCClient",
     # Utilities
     "slice_rect",
     "key_codes",
-    "encodings",
-    "pixel_formats",
+    "PIXEL_FORMATS",
+    "pack_apple_remote_desktop",
 ]

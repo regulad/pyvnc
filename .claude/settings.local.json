@@ -22,7 +22,9 @@
       "Bash(.venv/Scripts/ruff format:*)",
       "Bash(.venv/Scripts/ruff linter:*)",
       "Bash(RUFF_DEBUG=1 .venv/Scripts/ruff check pyvnc/pyvnc_async.py --select E501)",
-      "WebSearch"
+      "WebSearch",
+      "mcp__ddg-search__search",
+      "mcp__ddg-search__fetch_content"
     ]
   }
 }

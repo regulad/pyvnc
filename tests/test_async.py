@@ -39,7 +39,11 @@ def load_test_config() -> VNCConfig:
         return None
 
     return VNCConfig(
-        host=host, port=port, username=username, password=password, timeout=10.0
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        connection_timeout=10.0,
     )
 
 
@@ -164,7 +168,7 @@ class TestVNCIntegration(unittest.TestCase):
                     import time
 
                     timestamp = int(time.time())
-                    project_png = f"async_screenshot_{timestamp}.png"
+                    project_png = f"test_screenshot_{timestamp}.png"
                     image.save(png_path, "PNG")
                     image.save(project_png, "PNG")
 
@@ -248,7 +252,7 @@ class TestErrorHandling(unittest.TestCase):
 
         async def run_test():
             bad_config = VNCConfig(
-                host="nonexistent.example.com", port=9999, timeout=1.0
+                host="nonexistent.example.com", port=9999, connection_timeout=1.0
             )
             with self.assertRaises(Exception):
                 await VNCClient.connect(bad_config)

@@ -29,7 +29,11 @@ def load_test_config() -> VNCConfig:
         return None
 
     return VNCConfig(
-        host=host, port=port, username=username, password=password, timeout=10.0
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        connection_timeout=10.0,
     )
 
 
@@ -161,7 +165,7 @@ class TestErrorHandling(unittest.TestCase):
 
         async def run_test():
             bad_config = VNCConfig(
-                host="nonexistent.example.com", port=9999, timeout=1.0
+                host="nonexistent.example.com", port=9999, connection_timeout=1.0
             )
             with self.assertRaises(Exception):
                 await VNCClient.connect(bad_config)

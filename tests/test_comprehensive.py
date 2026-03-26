@@ -42,7 +42,11 @@ def load_test_config() -> VNCConfig:
         return None
 
     return VNCConfig(
-        host=host, port=port, username=username, password=password, timeout=10.0
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        connection_timeout=10.0,
     )
 
 
@@ -54,8 +58,7 @@ class TestVNCConfig(unittest.TestCase):
         config = VNCConfig()
         self.assertEqual(config.host, "localhost")
         self.assertEqual(config.port, 5900)
-        self.assertEqual(config.timeout, 5.0)
-        self.assertEqual(config.pixel_format, "rgba")
+        self.assertEqual(config.connection_timeout, 5.0)
         self.assertIsNone(config.username)
         self.assertIsNone(config.password)
 
@@ -64,15 +67,13 @@ class TestVNCConfig(unittest.TestCase):
         config = VNCConfig(
             host="remote.example.com",
             port=5901,
-            timeout=10.0,
-            pixel_format="bgra",
+            connection_timeout=10.0,
             username="testuser",
             password="testpass",
         )
         self.assertEqual(config.host, "remote.example.com")
         self.assertEqual(config.port, 5901)
-        self.assertEqual(config.timeout, 10.0)
-        self.assertEqual(config.pixel_format, "bgra")
+        self.assertEqual(config.connection_timeout, 10.0)
         self.assertEqual(config.username, "testuser")
         self.assertEqual(config.password, "testpass")
 
@@ -289,7 +290,7 @@ class TestVNCIntegration(unittest.TestCase):
                     import time
 
                     timestamp = int(time.time())
-                    project_png = f"async_screenshot_{timestamp}.png"
+                    project_png = f"test_screenshot_{timestamp}.png"
                     image.save(png_path, "PNG")
                     image.save(project_png, "PNG")
 
@@ -336,7 +337,7 @@ class TestErrorHandling(unittest.TestCase):
 
         async def run_test():
             bad_config = VNCConfig(
-                host="nonexistent.example.com", port=9999, timeout=1.0
+                host="nonexistent.example.com", port=9999, connection_timeout=1.0
             )
             with self.assertRaises(Exception):
                 await VNCClient.connect(bad_config)
@@ -358,12 +359,6 @@ class TestErrorHandling(unittest.TestCase):
                 pass  # Connection might fail, that's ok for this test
 
         asyncio.run(run_test())
-
-    def test_apple_auth_detection(self):
-        """Test that Apple authentication is properly detected."""
-        from pyvnc import AUTH_TYPE_APPLE
-
-        self.assertEqual(AUTH_TYPE_APPLE, 33)
 
 
 def main():
