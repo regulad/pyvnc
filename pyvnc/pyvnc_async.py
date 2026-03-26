@@ -82,129 +82,6 @@ async def _read_int(reader: asyncio.StreamReader, length: int) -> int:
     return int.from_bytes(await _read_bytes(reader, length), "big")
 
 
-async def _connect_vnc(config: Optional[VNCConfig] = None) -> "VNCClient":
-    """Internal: connect to VNC server and return a VNCClient instance."""
-    if config is None:
-        config = VNCConfig()
-
-    # Connect and handshake
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(config.host, config.port),
-        timeout=config.connection_timeout,
-    )
-
-    intro = await _read_bytes(reader, VNC_PROTOCOL_HEADER_SIZE)
-    if intro[:4] != VNC_PROTOCOL_PREFIX:
-        raise ValueError("not a VNC server")
-    writer.write(VNC_PROTOCOL_HEADER)
-    await writer.drain()
-
-    # Negotiate an authentication type
-    auth_types = set(await _read_bytes(reader, await _read_int(reader, 1)))
-    if not auth_types:
-        reason = await _read_bytes(reader, await _read_int(reader, 4))
-        raise ValueError(reason.decode("utf8"))
-    for auth_type in (AUTH_TYPE_NONE, AUTH_TYPE_VNC, AUTH_TYPE_APPLE):
-        if auth_type in auth_types:
-            break
-    else:
-        raise ValueError(f"unsupported VNC auth types: {auth_types}")
-
-    # Authentication routines are taken from https://github.com/barneygale/pytest-vnc/blob/main/pytest_vnc.py
-
-    # VNC authentication
-    if auth_type == AUTH_TYPE_VNC:
-        writer.write(b"\x02")
-        await writer.drain()
-        if config.password is None:
-            raise ValueError("VNC server requires password")
-        des_key = config.password.encode(RFC_6143_CANON_STRING_ENCODING)[:8].ljust(
-            8, b"\x00"
-        )
-        des_key = bytes(int(bin(n)[:1:-1].ljust(8, "0"), 2) for n in des_key)
-        encryptor = Cipher(TripleDES(des_key), ECB()).encryptor()
-        challenge = await _read_bytes(reader, 16)
-        writer.write(encryptor.update(challenge) + encryptor.finalize())
-        await writer.drain()
-
-    # Apple authentication
-    elif auth_type == AUTH_TYPE_APPLE:
-        writer.write(b"\x21\x00\x00\x00\x0a\x01\x00RSA1\x00\x00\x00\x00")
-        await writer.drain()
-        if config.password is None or config.username is None:
-            raise ValueError("VNC server requires username & password")
-        await _read_bytes(reader, 6)  # padding
-        host_key_bytes = await _read_bytes(reader, await _read_int(reader, 4))
-        host_key = cast(RSAPublicKey, load_der_public_key(host_key_bytes))
-        await _read_bytes(reader, 1)  # padding
-        aes_key_bytes = token_bytes(16)
-        # ECB is ok since only a single 128-byte block is encrypted
-        encryptor = Cipher(AES128(aes_key_bytes), ECB()).encryptor()
-        aes_block = pack_apple_remote_desktop(
-            config.username
-        ) + pack_apple_remote_desktop(config.password)
-        assert len(aes_block) == 128
-        encrypted_creds = encryptor.update(aes_block)
-        del encryptor  # further uses of the encryptor compromise the security model, delete to prevent accdl. uses
-        encrypted_session_key = host_key.encrypt(aes_key_bytes, PKCS1v15())
-        response_payload = (
-            b"\x00\x00\x01\x8a\x01\x00RSA1"
-            + (b"\x00\x01" + encrypted_creds)
-            + (b"\x00\x01" + encrypted_session_key)
-        )
-        writer.write(response_payload)
-        await writer.drain()
-        # server will calculate a response and will either close connection or allow following read
-        # to succeed
-        await _read_bytes(reader, 4)
-
-    # No authentication
-    elif auth_type == AUTH_TYPE_NONE:
-        writer.write(b"\x01")
-        await writer.drain()
-
-    # Check auth result
-    auth_result = await _read_int(reader, 4)
-    if auth_result == AUTH_STATE_PERMITTED:
-        pass
-    elif auth_result == AUTH_STATE_FAILED:
-        raise PermissionError("VNC auth failed (retry permitted)")
-    elif auth_result == AUTH_STATE_LOCKOUT:
-        raise PermissionError("VNC auth failed (too many attempts)")
-    else:
-        raise PermissionError(f"VNC auth failed (unknown reason {auth_result})")
-
-    # Negotiate pixel format and encodings
-    # https://datatracker.ietf.org/doc/html/rfc6143#section-7.3.1
-    shared_flag = b"\x01"  # could be 0 if we want exclusive
-    writer.write(shared_flag)
-    await writer.drain()
-    # https://datatracker.ietf.org/doc/html/rfc6143#section-7.3.2)
-    framebuffer_width = await _read_int(reader, 2)
-    framebuffer_height = await _read_int(reader, 2)
-    pixel_format = PixelFormat.deserialize(await _read_bytes(reader, 16))
-    desktop_name = (await _read_bytes(reader, await _read_int(reader, 4))).decode(
-        RFC_6143_CANON_STRING_ENCODING
-    )
-
-    # at this point in time, the connection is live and the object can be initialized
-    rect = Rect(0, 0, framebuffer_width, framebuffer_height)
-    vnc_client = VNCClient(
-        reader,
-        writer,
-        rect=rect,
-        pixel_format=pixel_format,
-        desktop_name=desktop_name,
-    )
-
-    # some servers, like VMw, ignore sent pixel formats, so if it's possible to use the one that has been sent to us we will use it
-    # TODO
-
-    await vnc_client._set_encodings(*SUPPORTED_ENCODINGS)
-
-    return vnc_client
-
-
 class VNCClient:
     """An asynchronous VNC client with a persistent background event loop."""
 
@@ -226,10 +103,10 @@ class VNCClient:
         self._zlib_decompress = decompressobj().decompress
 
         # internal state
-        self._pixels: Optional[np.ndarray] = None
+        self._pixels_rgba: Optional[np.ndarray] = None
         self._pixels_lock = asyncio.Lock()
-        self._mouse_position: Point = Point(0, 0)
-        self._mouse_buttons: int = 0
+        self._mouse_position: Point = Point(0, 0)  # not a literal type
+        self._mouse_buttons: int = 0  # not a literal type
 
         # Background task management
         self._running = False
@@ -237,7 +114,7 @@ class VNCClient:
         self._capture_event = asyncio.Event()
 
     @classmethod
-    async def connect(cls, config: Optional[VNCConfig] = None) -> "VNCClient":
+    async def connect(cls, config: VNCConfig) -> "VNCClient":
         """
         Connect to a VNC server and start the background event loop.
 
@@ -247,12 +124,147 @@ class VNCClient:
         Returns:
             Connected VNCClient instance with running background task.
         """
-        client = await _connect_vnc(config)
-        client._running = True
-        client._listener_task = asyncio.create_task(
-            client._framebuffer_listener(), name="vnc_frame_listener"
+
+        # Connect and handshake
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(config.host, config.port),
+            timeout=config.connection_timeout,
         )
-        return client
+
+        intro = await _read_bytes(reader, VNC_PROTOCOL_HEADER_SIZE)
+        if intro[:4] != VNC_PROTOCOL_PREFIX:
+            raise ValueError("not a VNC server")
+        writer.write(VNC_PROTOCOL_HEADER)
+        await writer.drain()
+
+        # Negotiate an authentication type
+        auth_types = set(await _read_bytes(reader, await _read_int(reader, 1)))
+        if not auth_types:
+            reason = await _read_bytes(reader, await _read_int(reader, 4))
+            raise ValueError(reason.decode("utf8"))
+        for auth_type in (AUTH_TYPE_NONE, AUTH_TYPE_VNC, AUTH_TYPE_APPLE):
+            if auth_type in auth_types:
+                break
+        else:
+            raise ValueError(f"unsupported VNC auth types: {auth_types}")
+
+        # Authentication routines are taken from https://github.com/barneygale/pytest-vnc/blob/main/pytest_vnc.py
+
+        # VNC authentication
+        if auth_type == AUTH_TYPE_VNC:
+            writer.write(b"\x02")
+            await writer.drain()
+            if config.password is None:
+                raise ValueError("VNC server requires password")
+            des_key = config.password.encode(RFC_6143_CANON_STRING_ENCODING)[:8].ljust(
+                8, b"\x00"
+            )
+            des_key = bytes(int(bin(n)[:1:-1].ljust(8, "0"), 2) for n in des_key)
+            encryptor = Cipher(TripleDES(des_key), ECB()).encryptor()
+            challenge = await _read_bytes(reader, 16)
+            writer.write(encryptor.update(challenge) + encryptor.finalize())
+            await writer.drain()
+
+        # Apple authentication
+        elif auth_type == AUTH_TYPE_APPLE:
+            writer.write(b"\x21\x00\x00\x00\x0a\x01\x00RSA1\x00\x00\x00\x00")
+            await writer.drain()
+            if config.password is None or config.username is None:
+                raise ValueError("VNC server requires username & password")
+            await _read_bytes(reader, 6)  # padding
+            host_key_bytes = await _read_bytes(reader, await _read_int(reader, 4))
+            host_key = cast(RSAPublicKey, load_der_public_key(host_key_bytes))
+            await _read_bytes(reader, 1)  # padding
+            aes_key_bytes = token_bytes(16)
+            # ECB is ok since only a single 128-byte block is encrypted
+            encryptor = Cipher(AES128(aes_key_bytes), ECB()).encryptor()
+            aes_block = pack_apple_remote_desktop(
+                config.username
+            ) + pack_apple_remote_desktop(config.password)
+            assert len(aes_block) == 128
+            encrypted_creds = encryptor.update(aes_block)
+            del encryptor  # further uses of the encryptor compromise the security model, delete to prevent accdl. uses
+            encrypted_session_key = host_key.encrypt(aes_key_bytes, PKCS1v15())
+            response_payload = (
+                b"\x00\x00\x01\x8a\x01\x00RSA1"
+                + (b"\x00\x01" + encrypted_creds)
+                + (b"\x00\x01" + encrypted_session_key)
+            )
+            writer.write(response_payload)
+            await writer.drain()
+            # server will calculate a response and will either close connection or allow following read
+            # to succeed
+            await _read_bytes(reader, 4)
+
+        # No authentication
+        elif auth_type == AUTH_TYPE_NONE:
+            writer.write(b"\x01")
+            await writer.drain()
+
+        # Check auth result
+        auth_result = await _read_int(reader, 4)
+        if auth_result == AUTH_STATE_PERMITTED:
+            pass
+        elif auth_result == AUTH_STATE_FAILED:
+            raise PermissionError("VNC auth failed (retry permitted)")
+        elif auth_result == AUTH_STATE_LOCKOUT:
+            raise PermissionError("VNC auth failed (too many attempts)")
+        else:
+            raise PermissionError(f"VNC auth failed (unknown reason {auth_result})")
+
+        # Negotiate pixel format and encodings
+        # https://datatracker.ietf.org/doc/html/rfc6143#section-7.3.1
+        shared_flag = b"\x01"  # could be 0 if we want exclusive
+        writer.write(shared_flag)
+        await writer.drain()
+        # https://datatracker.ietf.org/doc/html/rfc6143#section-7.3.2)
+        framebuffer_width = await _read_int(reader, 2)
+        framebuffer_height = await _read_int(reader, 2)
+        pixel_format = PixelFormat.deserialize(await _read_bytes(reader, 16))
+        desktop_name = (await _read_bytes(reader, await _read_int(reader, 4))).decode(
+            RFC_6143_CANON_STRING_ENCODING
+        )
+
+        # at this point in time, the connection is live and the object can be initialized
+        rect = Rect(0, 0, framebuffer_width, framebuffer_height)
+        vnc_client = cls(
+            reader,
+            writer,
+            rect=rect,
+            pixel_format=pixel_format,
+            desktop_name=desktop_name,
+        )
+
+        # some servers, like VMw, ignore sent pixel formats, so if it's possible to use the one that has been sent to us we will use it
+        if not pixel_format.true_color_flag:
+            raise NotImplementedError("Pallet encoding is not supported")
+        elif (pixel_format.bits_per_pixel != 32) or (pixel_format.depth != 24):
+            raise NotImplementedError("Non-32bpp servers are not supported")
+        elif (
+            (pixel_format.blue_max != 255)
+            or (pixel_format.red_max != 255)
+            or (pixel_format.green_max != 255)
+        ):
+            raise NotImplementedError("Only 8bit color is support")
+        elif pixel_format.big_endian_flag:
+            raise NotImplementedError("Only little-endian pixel colors are supported.")
+
+        await vnc_client._set_encodings(*SUPPORTED_ENCODINGS)
+
+        # we're good to start listening for server -> client messages now
+        vnc_client._running = True
+        vnc_client._listener_task = asyncio.create_task(
+            vnc_client._framebuffer_listener(), name="vnc_frame_listener"
+        )
+
+        # run an initial capture to populate the framebuffer, since some servers defer
+        # opening a draw context until after the first request for framebuffer has been made
+        await vnc_client.capture()
+
+        # ditto, to make sure the mouse position is where the client specifies for the first caller
+        await vnc_client.move(vnc_client._mouse_position)
+
+        return vnc_client
 
     async def close(self) -> None:
         """Close the VNC connection and stop background task."""
@@ -315,9 +327,11 @@ class VNCClient:
         num_rects = await _read_int(self._reader, 2)
 
         async with self._pixels_lock:
-            if self._pixels is None:
+            if self._pixels_rgba is None:
                 # Initialize framebuffer on first update
-                self._pixels = np.zeros((self.rect.height, self.rect.width, 4), "B")
+                self._pixels_rgba = np.zeros(
+                    (self.rect.height, self.rect.width, 4), "B"
+                )
 
             for _ in range(num_rects):
                 area_rect = Rect(
@@ -344,11 +358,24 @@ class VNCClient:
                     )
                     continue
 
-                area_pixels = np.ndarray(
+                area_pixels_native = np.ndarray(
                     (area_rect.height, area_rect.width, 4), "B", area
                 )
-                self._pixels[slice_rect(area_rect)] = area_pixels
-                self._pixels[slice_rect(area_rect, slice(3, 4))] = (
+                area_pixels_rgba = area_pixels_native.copy()
+
+                # Channel index = shift // 8 (each channel is 8 bits wide)
+                r_idx = self.pixel_format.red_shift // 8
+                g_idx = self.pixel_format.green_shift // 8
+                b_idx = self.pixel_format.blue_shift // 8
+
+                # Determine if any channel is out of standard RGBA order (R=0, G=1, B=2)
+                if r_idx != 0 or g_idx != 1 or b_idx != 2:
+                    area_pixels_rgba[:, :, 0] = area_pixels_native[:, :, r_idx]  # R
+                    area_pixels_rgba[:, :, 1] = area_pixels_native[:, :, g_idx]  # G
+                    area_pixels_rgba[:, :, 2] = area_pixels_native[:, :, b_idx]  # B
+
+                self._pixels_rgba[slice_rect(area_rect)] = area_pixels_rgba
+                self._pixels_rgba[slice_rect(area_rect, slice(3, 4))] = (
                     255  # Set alpha channel
                 )
 
@@ -427,10 +454,10 @@ class VNCClient:
                 pass  # Return whatever we have
 
         async with self._pixels_lock:
-            if self._pixels is None:
+            if self._pixels_rgba is None:
                 raise RuntimeError("No framebuffer data available yet")
 
-            return self._pixels[slice_rect(target_rect)].copy()
+            return self._pixels_rgba[slice_rect(target_rect)].copy()
 
     # Keyboard and mouse methods unchanged from original
 

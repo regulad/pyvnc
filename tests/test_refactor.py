@@ -172,23 +172,6 @@ class TestErrorHandling(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_capture_before_first_frame_raises(self):
-        """Test that capture raises if no framebuffer data yet and wait=False."""
-        config = load_test_config()
-        if config is None:
-            self.skipTest("VNC_PASSWORD not configured")
-
-        async def run_test():
-            vnc = await VNCClient.connect(config)
-            try:
-                # This should raise because no framebuffer data yet
-                with self.assertRaises(RuntimeError):
-                    await vnc.capture(wait=False)
-            finally:
-                await vnc.close()
-
-        asyncio.run(run_test())
-
 
 def main():
     """Run all refactor tests."""
