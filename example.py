@@ -1,60 +1,72 @@
 #!/usr/bin/env python3
 """
-Simple example demonstrating pyvnc library usage.
+Example demonstrating async pyvnc library usage.
 """
 
-from pyvnc import connect_vnc, VNCConfig, Point, Rect, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT
+import asyncio
+from pyvnc import (
+    VNCClient,
+    VNCConfig,
+    Point,
+    Rect,
+    MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_MIDDLE,
+    MOUSE_BUTTON_RIGHT,
+)
 
-def main():
+
+async def main():
     """Example VNC client usage."""
     # Configure connection
     config = VNCConfig(
-        host='localhost',
+        host="localhost",
         port=5900,
-        password='your_password_here'  # Replace with actual password or None for no auth
+        password="your_password_here",  # Replace with actual password or None for no auth
     )
-    
+
     try:
-        # Connect to VNC server
-        with connect_vnc(config) as vnc:
-            print(f"Connected to VNC server. Screen size: {vnc.rect.width}x{vnc.rect.height}")
-            
+        # Connect to VNC server (connection happens in __aenter__)
+        async with await VNCClient.connect(config) as vnc:
+            print(
+                f"Connected to VNC server. Screen size: {vnc.rect.width}x{vnc.rect.height}"
+            )
+
             # Take a screenshot of the entire screen
-            full_screenshot = vnc.capture()
+            full_screenshot = await vnc.capture()
             print(f"Full screenshot shape: {full_screenshot.shape}")
-            
+
             # Take a screenshot of a specific region
             region = Rect(x=100, y=100, width=200, height=150)
-            region_screenshot = vnc.capture(region)
+            region_screenshot = await vnc.capture(region)
             print(f"Region screenshot shape: {region_screenshot.shape}")
-            
+
             # Send keyboard input
-            vnc.write('Hello, VNC!')
-            vnc.press('Enter')
-            
+            await vnc.write("Hello, VNC!")
+            await vnc.press("Enter")
+
             # Send key combinations
-            vnc.press('Ctrl', 'a')  # Select all
-            vnc.press('Ctrl', 'c')  # Copy
-            
+            await vnc.press("Ctrl", "a")  # Select all
+            await vnc.press("Ctrl", "c")  # Copy
+
             # Mouse operations
-            vnc.move(Point(300, 400))
-            vnc.click(MOUSE_BUTTON_LEFT)  # Left click
-            vnc.double_click(MOUSE_BUTTON_LEFT)
-            
+            await vnc.move(Point(300, 400))
+            await vnc.click(MOUSE_BUTTON_LEFT)  # Left click
+            await vnc.double_click(MOUSE_BUTTON_LEFT)
+
             # Middle and right click
-            vnc.click(MOUSE_BUTTON_MIDDLE)
-            vnc.click(MOUSE_BUTTON_RIGHT)
-            
+            await vnc.click(MOUSE_BUTTON_MIDDLE)
+            await vnc.click(MOUSE_BUTTON_RIGHT)
+
             # Scroll wheel
-            vnc.scroll_up(3)
-            vnc.scroll_down(2)
-            
+            await vnc.scroll_up(3)
+            await vnc.scroll_down(2)
+
             # Drag operations
-            with vnc.hold_mouse():
-                vnc.move(Point(500, 600))
-            
+            async with vnc.hold_mouse():
+                await vnc.move(Point(500, 600))
+
             print("VNC operations completed successfully!")
-            
+
     except ConnectionError:
         print("Could not connect to VNC server. Make sure it's running and accessible.")
     except PermissionError:
@@ -64,5 +76,6 @@ def main():
     except Exception as e:
         print(f"Unexpected error: {e}")
 
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

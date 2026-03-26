@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, AsyncExitStack
-from typing import Callable, Optional, Union, AsyncIterator
+import logging
+from typing import Any, Callable, Optional, Union, AsyncIterator
 from zlib import decompressobj
 
 import numpy as np
@@ -35,8 +36,6 @@ from .pyvnc_common import (
     ENCODING_RAW,
     ENCODING_ZLIB,
     MOUSE_BUTTON_LEFT,
-    MOUSE_BUTTON_MIDDLE,
-    MOUSE_BUTTON_RIGHT,
     MOUSE_BUTTON_SCROLL_UP,
     MOUSE_BUTTON_SCROLL_DOWN,
     Point,
@@ -51,12 +50,12 @@ from .pyvnc_common import (
     pixel_formats,
 )
 
+logger = logging.getLogger(__name__)
 
-async def read(reader: asyncio.StreamReader, length: int) -> bytes:
-    """
-    Read *length* bytes from the given stream reader.
-    """
-    data = b''
+
+async def _read_bytes(reader: asyncio.StreamReader, length: int) -> bytes:
+    """Read *length* bytes from the given stream reader."""
+    data = b""
     while len(data) < length:
         chunk = await reader.read(length - len(data))
         if not chunk:
@@ -65,352 +64,401 @@ async def read(reader: asyncio.StreamReader, length: int) -> bytes:
     return data
 
 
-async def read_int(reader: asyncio.StreamReader, length: int) -> int:
-    """
-    Read *length* bytes from the given stream reader and decode as a big-endian integer.
-    """
-    return int.from_bytes(await read(reader, length), 'big')
+async def _read_int(reader: asyncio.StreamReader, length: int) -> int:
+    """Read *length* bytes and decode as big-endian integer."""
+    return int.from_bytes(await _read_bytes(reader, length), "big")
 
 
-async def _async_connect_vnc(config: Optional[VNCConfig] = None) -> 'AsyncVNCClient':
-    """
-    Internal function to connect to a VNC server and return an AsyncVNCClient instance.
-    Use AsyncVNCClient.connect() instead.
-    """
+async def _connect_vnc(config: Optional[VNCConfig] = None) -> "VNCClient":
+    """Internal: connect to VNC server and return a VNCClient instance."""
     if config is None:
         config = VNCConfig()
 
     # Connect and handshake
     reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(config.host, config.port),
-        timeout=config.timeout
+        asyncio.open_connection(config.host, config.port), timeout=config.timeout
     )
-    
-    intro = await read(reader, VNC_PROTOCOL_HEADER_SIZE)
+
+    intro = await _read_bytes(reader, VNC_PROTOCOL_HEADER_SIZE)
     if intro[:4] != VNC_PROTOCOL_PREFIX:
-        raise ValueError('not a VNC server')
+        raise ValueError("not a VNC server")
     writer.write(VNC_PROTOCOL_VERSION)
     await writer.drain()
 
     # Negotiate an authentication type
-    auth_types = set(await read(reader, await read_int(reader, 1)))
+    auth_types = set(await _read_bytes(reader, await _read_int(reader, 1)))
     if not auth_types:
-        reason = await read(reader, await read_int(reader, 4))
-        raise ValueError(reason.decode('utf8'))
+        reason = await _read_bytes(reader, await _read_int(reader, 4))
+        raise ValueError(reason.decode("utf8"))
     for auth_type in (AUTH_TYPE_VNC, AUTH_TYPE_NONE):
         if auth_type in auth_types:
             break
     else:
         if AUTH_TYPE_APPLE in auth_types:
             raise NotImplementedError(
-                "Apple Remote Desktop authentication is not supported in this implementation. "
+                "Apple Remote Desktop authentication is not supported. "
                 "Please use standard VNC authentication or configure your VNC server to allow "
                 "password-based or no authentication."
             )
-        raise ValueError(f'unsupported VNC auth types: {auth_types}')
+        raise ValueError(f"unsupported VNC auth types: {auth_types}")
 
     # VNC authentication
     if auth_type == AUTH_TYPE_VNC:
-        writer.write(b'\x02')
+        writer.write(b"\x02")
         await writer.drain()
         if not config.password:
-            raise ValueError('VNC server requires password')
-        des_key = config.password.encode('ascii')[:8].ljust(8, b'\x00')
-        des_key = bytes(int(bin(n)[:1:-1].ljust(8, '0'), 2) for n in des_key)
+            raise ValueError("VNC server requires password")
+        des_key = config.password.encode("ascii")[:8].ljust(8, b"\x00")
+        des_key = bytes(int(bin(n)[:1:-1].ljust(8, "0"), 2) for n in des_key)
         encryptor = Cipher(TripleDES(des_key), ECB()).encryptor()
-        challenge = await read(reader, 16)
+        challenge = await _read_bytes(reader, 16)
         writer.write(encryptor.update(challenge) + encryptor.finalize())
         await writer.drain()
 
     # No authentication
     elif auth_type == AUTH_TYPE_NONE:
-        writer.write(b'\x01')
+        writer.write(b"\x01")
         await writer.drain()
 
     # Check auth result
-    auth_result = await read_int(reader, 4)
+    auth_result = await _read_int(reader, 4)
     if auth_result == 0:
         pass
     elif auth_result == 1:
-        raise PermissionError('VNC auth failed')
+        raise PermissionError("VNC auth failed")
     elif auth_result == 2:
-        raise PermissionError('VNC auth failed (too many attempts)')
+        raise PermissionError("VNC auth failed (too many attempts)")
     else:
-        reason = await read(reader, auth_result)
-        raise PermissionError(reason.decode('utf-8'))
+        reason = await _read_bytes(reader, auth_result)
+        raise PermissionError(reason.decode("utf-8"))
 
     # Negotiate pixel format and encodings
-    writer.write(b'\x01')
+    writer.write(b"\x01")
     await writer.drain()
-    rect = Rect(0, 0, await read_int(reader, 2), await read_int(reader, 2))
-    await read(reader, 16)
-    await read(reader, await read_int(reader, 4))
-    writer.write(b'\x00\x00\x00\x00' + pixel_formats[config.pixel_format] +
-                 b'\x02\x00' + len(encodings).to_bytes(2, 'big') +
-                 b''.join(encoding.to_bytes(4, 'big') for encoding in encodings))
+    rect = Rect(0, 0, await _read_int(reader, 2), await _read_int(reader, 2))
+    await _read_bytes(reader, 16)
+    await _read_bytes(reader, await _read_int(reader, 4))
+    writer.write(
+        b"\x00\x00\x00\x00"
+        + pixel_formats[config.pixel_format]
+        + b"\x02\x00"
+        + len(encodings).to_bytes(2, "big")
+        + b"".join(encoding.to_bytes(4, "big") for encoding in encodings)
+    )
     await writer.drain()
-    
-    return AsyncVNCClient(reader, writer, decompressobj().decompress, rect, intro)
+
+    return VNCClient(reader, writer, decompressobj().decompress, rect, intro)
 
 
-class AsyncVNCClient(CommonVNCClient):
-    """
-    An asynchronous VNC client.
-    """
-    
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, 
-                 decompress: Callable[[bytes], bytes], rect: Rect, intro: str):
+class VNCClient(CommonVNCClient):
+    """An asynchronous VNC client with a persistent background event loop."""
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        decompress: Callable[[bytes], bytes],
+        rect: Rect,
+        intro: bytes,
+    ):
         super().__init__(rect)
-        self.reader = reader
-        self.writer = writer
-        self.decompress = decompress
+        self._reader = reader
+        self._writer = writer
+        self._decompress = decompress
         self.intro = intro
 
+        # Framebuffer storage with lock
+        self._pixels: Optional[np.ndarray] = None
+        self._pixels_lock = asyncio.Lock()
+
+        # Background task management
+        self._running = False
+        self._listener_task: Optional[asyncio.Task[None]] = None
+        self._capture_event = asyncio.Event()
+
     @classmethod
-    async def connect(cls, config: Optional[VNCConfig] = None) -> 'AsyncVNCClient':
+    async def connect(cls, config: Optional[VNCConfig] = None) -> "VNCClient":
         """
-        Connect to a VNC server and return an AsyncVNCClient instance.
-        
+        Connect to a VNC server and start the background event loop.
+
         Args:
-            config: VNC connection configuration. If None, uses default configuration.
-            
+            config: VNC connection configuration. If None, uses default.
+
         Returns:
-            AsyncVNCClient instance ready for use.
-            
-        Raises:
-            ValueError: If not a VNC server or unsupported authentication.
-            PermissionError: If authentication fails.
+            Connected VNCClient instance with running background task.
         """
-        return await _async_connect_vnc(config)
+        client = await _connect_vnc(config)
+        client._running = True
+        client._listener_task = asyncio.create_task(
+            client._framebuffer_listener(), name="vnc_frame_listener"
+        )
+        return client
 
     async def close(self) -> None:
-        """Close the VNC connection."""
-        self.writer.close()
-        await self.writer.wait_closed()
+        """Close the VNC connection and stop background task."""
+        self._running = False
 
-    async def __aenter__(self) -> 'AsyncVNCClient':
+        if self._listener_task:
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+
+        self._writer.close()
+        await self._writer.wait_closed()
+
+    async def __aenter__(self) -> "VNCClient":
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any | None,
+    ) -> None:
         await self.close()
 
-    @asynccontextmanager
-    async def _write_key(self, key: str) -> AsyncIterator['AsyncVNCClient']:
-        data = key_codes[key].to_bytes(4, 'big')
-        self.writer.write(b'\x04\x01\x00\x00' + data)
-        await self.writer.drain()
-        try:
-            yield
-        finally:
-            self.writer.write(b'\x04\x00\x00\x00' + data)
-            await self.writer.drain()
-    
-    async def _write_mouse(self) -> None:
-        self.writer.write(
-            b'\x05' +
-            self.mouse_buttons.to_bytes(1, 'big') +
-            self.mouse_position.x.to_bytes(2, 'big') +
-            self.mouse_position.y.to_bytes(2, 'big'))
-        await self.writer.drain()
-
-
-
-    async def capture(self, rect: Optional[Union[Rect, RectLike]] = None, *, relative: bool = False) -> np.ndarray:
+    async def _framebuffer_listener(self) -> None:
         """
-        Takes a screenshot and returns its pixels as an RGBA numpy array.
-        
+        Background task: continuously listens for VNC server framebuffer updates.
+        Runs until _running is set to False.
+        """
+        while self._running:
+            try:
+                update_type = await _read_int(self._reader, 1)
+
+                if update_type == MSG_TYPE_CLIPBOARD:
+                    # Skip clipboard data - not implementing clipboard sync
+                    await _read_bytes(self._reader, await _read_int(self._reader, 4))
+
+                elif update_type == MSG_TYPE_FRAMEBUFFER_UPDATE:
+                    await self._handle_framebuffer_update()
+
+                else:
+                    # Unknown message type - log and skip to avoid blocking
+                    logger.warning(f"Unknown VNC message type: {update_type}, skipping")
+
+            except asyncio.CancelledError:
+                break
+            except ConnectionError:
+                # Connection closed
+                break
+            except Exception:
+                # Log and continue
+                continue
+
+    async def _handle_framebuffer_update(self) -> None:
+        """Process a framebuffer update message from the server."""
+        await _read_bytes(self._reader, 1)  # padding
+
+        num_rects = await _read_int(self._reader, 2)
+
+        async with self._pixels_lock:
+            if self._pixels is None:
+                # Initialize framebuffer on first update
+                self._pixels = np.zeros((self.rect.height, self.rect.width, 4), "B")
+
+            for _ in range(num_rects):
+                area_rect = Rect(
+                    await _read_int(self._reader, 2),
+                    await _read_int(self._reader, 2),
+                    await _read_int(self._reader, 2),
+                    await _read_int(self._reader, 2),
+                )
+                area_encoding = await _read_int(self._reader, 4)
+
+                if area_encoding == ENCODING_RAW:
+                    area = await _read_bytes(
+                        self._reader, area_rect.height * area_rect.width * 4
+                    )
+                elif area_encoding == ENCODING_ZLIB:
+                    compressed = await _read_bytes(
+                        self._reader, await _read_int(self._reader, 4)
+                    )
+                    area = self._decompress(compressed)
+                else:
+                    # Skip unsupported encoding
+                    logger.warning(
+                        f"Unsupported VNC encoding: {area_encoding}, skipping rectangle"
+                    )
+                    continue
+
+                area_pixels = np.ndarray(
+                    (area_rect.height, area_rect.width, 4), "B", area
+                )
+                self._pixels[slice_rect(area_rect)] = area_pixels
+                self._pixels[slice_rect(area_rect, slice(3, 4))] = (
+                    255  # Set alpha channel
+                )
+
+        # Signal that new framebuffer data is available
+        self._capture_event.set()
+
+    async def _request_framebuffer_update(self, rect: Rect) -> None:
+        """Send a framebuffer update request to the VNC server."""
+        self._writer.write(
+            b"\x03\x00"
+            + rect.x.to_bytes(2, "big")
+            + rect.y.to_bytes(2, "big")
+            + rect.width.to_bytes(2, "big")
+            + rect.height.to_bytes(2, "big")
+        )
+        await self._writer.drain()
+
+    async def capture(
+        self,
+        rect: Optional[Union[Rect, RectLike]] = None,
+        *,
+        wait: bool = True,
+        timeout: Optional[float] = 10.0,
+    ) -> np.ndarray:
+        """
+        Take a screenshot and return pixels as an RGBA numpy array.
+
         Args:
             rect: Region to capture. If None, captures entire screen.
-            relative: If True, interpret coordinates as relative coordinates.
-            
+            wait: If True, wait for the server to send an update before returning.
+                  If False, return current buffer (may be None if no data yet).
+            timeout: Maximum time to wait for update (seconds). None for no timeout.
+
         Returns:
             RGBA numpy array of the specified region.
         """
-        if rect is None:
-            rect = self.rect
-        elif isinstance(rect, RectLike):
-            rect = rect.get_rect()
-        elif relative:
-            rect = self._convert_relative_rect(rect)
-        
-        self.writer.write(
-            b'\x03\x00' +
-            rect.x.to_bytes(2, 'big') +
-            rect.y.to_bytes(2, 'big') +
-            rect.width.to_bytes(2, 'big') +
-            rect.height.to_bytes(2, 'big'))
-        await self.writer.drain()
-        
-        pixels = np.zeros((self.rect.height, self.rect.width, 4), 'B')
-        while True:
-            update_type = await read_int(self.reader, 1)
-            if update_type == MSG_TYPE_CLIPBOARD:
-                await read(self.reader, await read_int(self.reader, 4))
-            elif update_type == MSG_TYPE_FRAMEBUFFER_UPDATE:
-                await read(self.reader, 1)  # padding
-                for _ in range(await read_int(self.reader, 2)):
-                    area_rect = Rect(
-                        await read_int(self.reader, 2), await read_int(self.reader, 2),
-                        await read_int(self.reader, 2), await read_int(self.reader, 2))
-                    area_encoding = await read_int(self.reader, 4)
-                    if area_encoding == ENCODING_RAW:
-                        area = await read(self.reader, area_rect.height * area_rect.width * 4)
-                    elif area_encoding == ENCODING_ZLIB:
-                        area = await read(self.reader, await read_int(self.reader, 4))
-                        area = self.decompress(area)
-                    else:
-                        raise ValueError(f'unsupported VNC encoding: {area_encoding}')
-                    area = np.ndarray((area_rect.height, area_rect.width, 4), 'B', area)
-                    pixels[slice_rect(area_rect)] = area
-                    pixels[slice_rect(area_rect, 3)] = 255
-                if pixels[slice_rect(rect, 3)].all():
-                    return pixels[slice_rect(rect)]
-            else:
-                raise ValueError(f'unsupported VNC update type: {update_type}')
+        # Convert rect to absolute coordinates
+        target_rect = (
+            self.rect
+            if rect is None
+            else (rect.get_rect() if isinstance(rect, RectLike) else rect)
+        )
+
+        # Ensure we have a valid target rect
+        assert isinstance(target_rect, Rect)
+
+        # Request update from server
+        await self._request_framebuffer_update(target_rect)
+
+        if wait:
+            # Clear event and wait for update
+            self._capture_event.clear()
+            try:
+                await asyncio.wait_for(self._capture_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass  # Return whatever we have
+
+        async with self._pixels_lock:
+            if self._pixels is None:
+                raise RuntimeError("No framebuffer data available yet")
+
+            return self._pixels[slice_rect(target_rect)].copy()
+
+    # Keyboard and mouse methods unchanged from original
 
     @asynccontextmanager
-    async def hold_key(self, *keys: str) -> AsyncIterator['AsyncVNCClient']:
-        """
-        Context manager that pushes the given keys on enter, and releases them (in reverse order) on exit.
-        """
+    async def _write_key(self, key: str) -> AsyncIterator["VNCClient"]:
+        data = key_codes[key].to_bytes(4, "big")
+        self._writer.write(b"\x04\x01\x00\x00" + data)
+        await self._writer.drain()
+        try:
+            yield self
+        finally:
+            self._writer.write(b"\x04\x00\x00\x00" + data)
+            await self._writer.drain()
+
+    async def _write_mouse(self) -> None:
+        self._writer.write(
+            b"\x05"
+            + self.mouse_buttons.to_bytes(1, "big")
+            + self.mouse_position.x.to_bytes(2, "big")
+            + self.mouse_position.y.to_bytes(2, "big")
+        )
+        await self._writer.drain()
+
+    @asynccontextmanager
+    async def hold_key(self, *keys: str) -> AsyncIterator["VNCClient"]:
+        """Context manager that presses keys on enter, releases them on exit."""
         async with AsyncExitStack() as stack:
             for key in keys:
                 await stack.enter_async_context(self._write_key(key))
             yield self
 
-    async def press(self, *keys: str) -> 'AsyncVNCClient':
-        """
-        Pushes all the given keys, and then releases them in reverse order.
-        """
+    async def press(self, *keys: str) -> "VNCClient":
+        """Push all given keys, then release them in reverse order."""
         async with self.hold_key(*keys):
             pass
         return self
 
-    async def write(self, text: str) -> 'AsyncVNCClient':
-        """
-        Pushes and releases each of the given keys, one after the other.
-        """
+    async def write(self, text: str) -> "VNCClient":
+        """Push and release each key one after the other."""
         for key in text:
             async with self.hold_key(key):
                 pass
         return self
 
     @asynccontextmanager
-    async def hold_mouse(self, button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> AsyncIterator['AsyncVNCClient']:
-        """
-        Context manager that holds down a mouse button for dragging operations.
-        
-        The button is pressed on enter and released on exit. Move the mouse while
-        in this context to perform drag operations.
-        
-        Args:
-            button: Mouse button to hold down. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
-                   or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
-            relative: If True, use relative coordinates for mouse operations within context.
-        """
+    async def hold_mouse(
+        self, button: int = MOUSE_BUTTON_LEFT
+    ) -> AsyncIterator["VNCClient"]:
+        """Context manager that holds a mouse button for dragging."""
         mask = 1 << button
         self.mouse_buttons |= mask
         await self._write_mouse()
         try:
-            # Store the relative flag for use in mouse operations
-            old_relative = getattr(self, '_relative_mode', False)
-            self._relative_mode = relative
             yield self
         finally:
             self.mouse_buttons &= ~mask
             await self._write_mouse()
-            self._relative_mode = old_relative
 
-    async def click(self, button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> 'AsyncVNCClient':
-        """
-        Presses and releases a mouse button.
-        
-        Args:
-            button: Mouse button to click. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
-                   or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
-            relative: If True, use relative coordinates for current position.
-        """
-        async with self.hold_mouse(button, relative=relative):
+    async def click(self, button: int = MOUSE_BUTTON_LEFT) -> "VNCClient":
+        """Press and release a mouse button."""
+        async with self.hold_mouse(button):
             pass
         return self
 
-    async def double_click(self, button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> 'AsyncVNCClient':
-        """
-        Presses and releases a mouse button twice.
-        
-        Args:
-            button: Mouse button to click. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
-                   or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
-            relative: If True, use relative coordinates for current position.
-        """
-        await self.click(button, relative=relative)
-        await self.click(button, relative=relative)
+    async def double_click(self, button: int = MOUSE_BUTTON_LEFT) -> "VNCClient":
+        """Press and release a mouse button twice."""
+        await self.click(button)
+        await self.click(button)
         return self
 
-    async def scroll_up(self, repeat: int = 1) -> 'AsyncVNCClient':
-        """
-        Scrolls the mouse wheel upwards.
-        """
+    async def scroll_up(self, repeat: int = 1) -> "VNCClient":
+        """Scroll the mouse wheel upwards."""
         for _ in range(repeat):
             await self.click(MOUSE_BUTTON_SCROLL_UP)
         return self
 
-    async def scroll_down(self, repeat: int = 1) -> 'AsyncVNCClient':
-        """
-        Scrolls the mouse wheel downwards.
-        """
+    async def scroll_down(self, repeat: int = 1) -> "VNCClient":
+        """Scroll the mouse wheel downwards."""
         for _ in range(repeat):
             await self.click(MOUSE_BUTTON_SCROLL_DOWN)
         return self
 
-    async def move(self, point: Union[Point, PointLike], *, relative: bool = False) -> 'AsyncVNCClient':
-        """
-        Moves the mouse cursor to the given co-ordinates.
-        
-        Args:
-            point: Target position to move to.
-            relative: If True, interpret coordinates as relative coordinates.
-        """
+    async def move(self, point: Union[Point, PointLike]) -> "VNCClient":
+        """Move the mouse cursor to the given coordinates."""
         if isinstance(point, PointLike):
             point = point.get_point()
-        
-        # Check if we're in relative mode from drag context or explicit parameter
-        use_relative = relative or getattr(self, '_relative_mode', False)
-        if use_relative:
-            point = self._convert_relative_point(point)
-            
+
         self.mouse_position = point
         await self._write_mouse()
         return self
 
-    async def click_at(self, point: Union[Point, PointLike], button: int = MOUSE_BUTTON_LEFT, *, relative: bool = False) -> 'AsyncVNCClient':
-        """
-        Move to a point and click.
-        
-        Args:
-            point: Position to click at.
-            button: Mouse button to click. Use MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, 
-                   or MOUSE_BUTTON_RIGHT constants instead of raw numbers.
-            relative: If True, interpret coordinates as relative coordinates.
-        """
-        await self.move(point, relative=relative)
-        await self.click(button, relative=relative)
+    async def click_at(
+        self, point: Union[Point, PointLike], button: int = MOUSE_BUTTON_LEFT
+    ) -> "VNCClient":
+        """Move to a point and click."""
+        await self.move(point)
+        await self.click(button)
         return self
 
-    async def double_click_at(self, point: Union[Point, PointLike], button: int = 0, *, relative: bool = False) -> 'AsyncVNCClient':
-        """
-        Move to a point and double-click.
-        
-        Args:
-            point: Position to double-click at.
-            button: Mouse button to click (0=left, 1=middle, 2=right).
-            relative: If True, interpret coordinates as relative coordinates.
-        """
-        await self.move(point, relative=relative)
-        await self.double_click(button, relative=relative)
+    async def double_click_at(
+        self, point: Union[Point, PointLike], button: int = MOUSE_BUTTON_LEFT
+    ) -> "VNCClient":
+        """Move to a point and double-click."""
+        await self.move(point)
+        await self.double_click(button)
         return self
 
 
 __all__ = [
-    'AsyncVNCClient',
+    "VNCClient",
 ]
