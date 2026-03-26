@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python test_refactor.py)",
+      "Bash(VNC_HOST=localhost VNC_PORT=5900 VNC_PASSWORD=Claude487 .venv/Scripts/python tests/test_comprehensive.py)",
+      "Bash(.venv/Scripts/python tests/test_basic.py)",
+      "Bash(.venv/Scripts/python -c \"import pyvnc.pyvnc_async; print\\('Module imports successfully'\\)\")",
+      "Bash(VNC_HOST=localhost VNC_PORT=5900 VNC_PASSWORD=Claude487 .venv/Scripts/python tests/test_async.py)",
+      "Bash(.venv/Scripts/python -c \"\ncontent = open\\('tests/test_basic.py', 'rb'\\).read\\(\\)\nprint\\(repr\\(content[3450:3950]\\)\\)\n\")",
+      "Bash(.venv/Scripts/python -c \"\ncontent = open\\('tests/test_basic.py', 'r', encoding='utf-8'\\).read\\(\\)\ncontent = content.replace\\('✓', '[OK]'\\)\ncontent = content.replace\\('✗', '[FAIL]'\\)\ncontent = content.replace\\('✅', '[ALL PASSED]'\\)\ncontent = content.replace\\('❌', '[SOME FAILED]'\\)\nopen\\('tests/test_basic.py', 'w', encoding='utf-8'\\).write\\(content\\)\nprint\\('Fixed'\\)\")",
+      "Bash(ls -la .pre-commit* .github/hooks/pre-commit)",
+      "Bash(.venv/Scripts/pre-commit install:*)",
+      "Bash(.venv/Scripts/pre-commit run:*)",
+      "Bash(.venv/Scripts/mypy pyvnc/ --strict 2>&1)",
+      "Bash(.venv/Scripts/mypy pyvnc/pyvnc_async.py --strict)",
+      "Bash(bash -c '.venv/Scripts/mypy pyvnc/ --strict')",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(.venv/Scripts/ruff check:*)",
+      "Bash(.venv/Scripts/ruff format:*)",
+      "Bash(.venv/Scripts/ruff linter:*)",
+      "Bash(RUFF_DEBUG=1 .venv/Scripts/ruff check pyvnc/pyvnc_async.py --select E501)",
+      "WebSearch"
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+# Pre-commit hooks for pyvnc
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: mixed-line-ending
+
+  # Ruff - fast Python linter and formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.7
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+      # Run the formatter
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # MyPy - static type checker (uses system mypy in .venv)
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: .venv/Scripts/mypy.exe pyvnc/ --strict
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  # Unit tests - run unittest for quick validation
+  - repo: local
+    hooks:
+      - id: unittest-quick
+        name: Run Python unittest
+        entry: .venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py" -v --failfast
+        language: system
+        pass_filenames: false
+        always_run: false
