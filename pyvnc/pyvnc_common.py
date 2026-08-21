@@ -11,8 +11,11 @@ from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass
 from dataclasses import astuple
+from functools import lru_cache
 from struct import unpack, pack
 from typing import Dict, Optional, Self, Tuple
+
+import numpy as np
 
 from frozendict import frozendict
 
@@ -102,6 +105,66 @@ class PixelFormat:
     def serialize(self) -> bytes:
         return pack(self.PYTHON_STRUCT_PIXEL_FORMAT, *astuple(self))
 
+    @property
+    def bytes_per_pixel(self) -> int:
+        return self.bits_per_pixel // 8
+
+    def decode_to_rgba(self, raw: bytes, height: int, width: int) -> np.ndarray:
+        """Decode raw framebuffer bytes into an (h, w, 4) uint8 RGBA array."""
+        if self.bits_per_pixel == 32:
+            native = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
+            r_idx = self.red_shift // 8
+            g_idx = self.green_shift // 8
+            b_idx = self.blue_shift // 8
+            if r_idx == 0 and g_idx == 1 and b_idx == 2:
+                out = native.copy()
+            else:
+                out = np.empty((height, width, 4), dtype=np.uint8)
+                out[..., 0] = native[..., r_idx]
+                out[..., 1] = native[..., g_idx]
+                out[..., 2] = native[..., b_idx]
+            out[..., 3] = 255
+            return out
+
+        if self.bits_per_pixel == 16:
+            dtype = ">u2" if self.big_endian_flag else "<u2"
+            px = np.frombuffer(raw, dtype=dtype).reshape(height, width)
+            out = np.empty((height, width, 4), dtype=np.uint8)
+            # RGB565 fast path
+            if (
+                self.red_max == 31
+                and self.green_max == 63
+                and self.blue_max == 31
+                and self.red_shift == 11
+                and self.green_shift == 5
+                and self.blue_shift == 0
+            ):
+                out[..., 0] = _channel_lut(31)[((px >> 11) & 0x1F).astype(np.uint8)]
+                out[..., 1] = _channel_lut(63)[((px >> 5) & 0x3F).astype(np.uint8)]
+                out[..., 2] = _channel_lut(31)[(px & 0x1F).astype(np.uint8)]
+            else:
+                out[..., 0] = _channel_lut(self.red_max)[
+                    ((px >> self.red_shift) & self.red_max).astype(np.uint16)
+                ]
+                out[..., 1] = _channel_lut(self.green_max)[
+                    ((px >> self.green_shift) & self.green_max).astype(np.uint16)
+                ]
+                out[..., 2] = _channel_lut(self.blue_max)[
+                    ((px >> self.blue_shift) & self.blue_max).astype(np.uint16)
+                ]
+            out[..., 3] = 255
+            return out
+
+        raise NotImplementedError(
+            f"Unsupported bits_per_pixel: {self.bits_per_pixel}"
+        )
+
+
+@lru_cache(maxsize=None)
+def _channel_lut(max_value: int) -> np.ndarray:
+    """LUT that scales an n-bit channel value in [0, max_value] to 8-bit."""
+    return (np.arange(max_value + 1) * 255 // max_value).astype(np.uint8)
+
 
 PIXEL_FORMATS = frozendict(
     {
@@ -116,6 +179,19 @@ PIXEL_FORMATS = frozendict(
         ),
         "abgr": PixelFormat.deserialize(
             b"\x20\x18\x01\x01\x00\xff\x00\xff\x00\xff\x00\x08\x10\x00\x00\x00"
+        ),
+        # RGB565: 16bpp, depth 16, LE, R5 G6 B5 (shifts 11/5/0)
+        "rgb565": PixelFormat(
+            bits_per_pixel=16,
+            depth=16,
+            big_endian_flag=False,
+            true_color_flag=True,
+            red_max=31,
+            green_max=63,
+            blue_max=31,
+            red_shift=11,
+            green_shift=5,
+            blue_shift=0,
         ),
     }
 )
