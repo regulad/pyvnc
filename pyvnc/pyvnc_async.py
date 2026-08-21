@@ -67,6 +67,21 @@ SUPPORTED_ENCODINGS = {
 }
 
 
+def _valid_16bpp_channels(pf: PixelFormat) -> bool:
+    """Validate a 16bpp PixelFormat's channel layout: each max is 2^n-1 and fits in 16 bits."""
+    for chan_max, shift in (
+        (pf.red_max, pf.red_shift),
+        (pf.green_max, pf.green_shift),
+        (pf.blue_max, pf.blue_shift),
+    ):
+        if chan_max <= 0 or (chan_max & (chan_max + 1)) != 0:
+            return False
+        bit_width = (chan_max + 1).bit_length() - 1
+        if shift < 0 or shift + bit_width > 16:
+            return False
+    return True
+
+
 async def _read_bytes(reader: asyncio.StreamReader, length: int) -> bytes:
     """Read *length* bytes from the given stream reader."""
     data = b""
@@ -235,18 +250,34 @@ class VNCClient:
         # some servers, like VMw, ignore sent pixel formats, so if it's possible to use the one that has been sent to us we will use it
         if not self.pixel_format.true_color_flag:
             raise NotImplementedError("Pallet encoding is not supported")
-        elif (self.pixel_format.bits_per_pixel != 32) or (
-            self.pixel_format.depth != 24
-        ):
-            raise NotImplementedError("Non-32bpp servers are not supported")
-        elif (
-            (self.pixel_format.blue_max != 255)
-            or (self.pixel_format.red_max != 255)
-            or (self.pixel_format.green_max != 255)
+        elif self.pixel_format.bits_per_pixel not in (16, 32):
+            raise NotImplementedError(
+                f"Only 16bpp and 32bpp servers are supported, server uses {self.pixel_format.bits_per_pixel}bpp"
+            )
+        elif self.pixel_format.bits_per_pixel == 32 and self.pixel_format.depth != 24:
+            raise NotImplementedError(
+                f"32bpp servers must use depth 24, server uses depth {self.pixel_format.depth}"
+            )
+        elif self.pixel_format.bits_per_pixel == 32 and (
+            self.pixel_format.blue_max != 255
+            or self.pixel_format.red_max != 255
+            or self.pixel_format.green_max != 255
         ):
             raise NotImplementedError("Only 8bit color is support")
-        elif self.pixel_format.big_endian_flag:
-            raise NotImplementedError("Only little-endian pixel colors are supported.")
+        elif (
+            self.pixel_format.bits_per_pixel == 32
+            and self.pixel_format.big_endian_flag
+        ):
+            # 32bpp big-endian is rare and not exercised; 16bpp big-endian is handled in decode_to_rgba
+            raise NotImplementedError(
+                "32bpp big-endian pixel colors are not supported."
+            )
+        elif self.pixel_format.bits_per_pixel == 16 and not _valid_16bpp_channels(
+            self.pixel_format
+        ):
+            raise NotImplementedError(
+                "16bpp channel layout is invalid (each max must be 2^n-1 and channels must fit in 16 bits)"
+            )
 
         await self._set_encodings(*SUPPORTED_ENCODINGS)
 
@@ -504,9 +535,11 @@ class VNCClient:
                 )
                 area_encoding = await _read_int(self._reader, 4)
 
+                bytes_per_pixel = self.pixel_format.bytes_per_pixel
                 if area_encoding == ENCODING_RAW:
                     area = await _read_bytes(
-                        self._reader, area_rect.height * area_rect.width * 4
+                        self._reader,
+                        area_rect.height * area_rect.width * bytes_per_pixel,
                     )
                 elif area_encoding == ENCODING_ZLIB:
                     compressed = await _read_bytes(
@@ -520,25 +553,10 @@ class VNCClient:
                     )
                     continue
 
-                area_pixels_native = np.ndarray(
-                    (area_rect.height, area_rect.width, 4), "B", area
-                )
-                area_pixels_rgba = area_pixels_native.copy()
-
-                # Channel index = shift // 8 (each channel is 8 bits wide)
-                r_idx = self.pixel_format.red_shift // 8
-                g_idx = self.pixel_format.green_shift // 8
-                b_idx = self.pixel_format.blue_shift // 8
-
-                # Determine if any channel is out of standard RGBA order (R=0, G=1, B=2)
-                if r_idx != 0 or g_idx != 1 or b_idx != 2:
-                    area_pixels_rgba[:, :, 0] = area_pixels_native[:, :, r_idx]  # R
-                    area_pixels_rgba[:, :, 1] = area_pixels_native[:, :, g_idx]  # G
-                    area_pixels_rgba[:, :, 2] = area_pixels_native[:, :, b_idx]  # B
-
-                self._pixels_rgba[slice_rect(area_rect)] = area_pixels_rgba
-                self._pixels_rgba[slice_rect(area_rect, slice(3, 4))] = (
-                    255  # Set alpha channel
+                self._pixels_rgba[slice_rect(area_rect)] = (
+                    self.pixel_format.decode_to_rgba(
+                        area, area_rect.height, area_rect.width
+                    )
                 )
 
         # Signal that new framebuffer data is available
