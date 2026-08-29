@@ -192,7 +192,7 @@ class TestVNCIntegration(unittest.TestCase):
                 self.assertGreater(vnc.rect.width, 0)
                 self.assertGreater(vnc.rect.height, 0)
 
-                rel_res = Point(vnc.rect.width, vnc.rect.height)
+                screen = Point(vnc.rect.width, vnc.rect.height)
 
                 # Test screenshots (may need to wait for first frame)
                 full_screenshot = await vnc.capture()
@@ -207,13 +207,15 @@ class TestVNCIntegration(unittest.TestCase):
                 self.assertEqual(region_screenshot.shape[0], region.height)
                 self.assertEqual(region_screenshot.shape[1], region.width)
 
-                # Test relative coordinate capture
-                rel_region = Rect(
-                    rel_res.x // 4, rel_res.y // 4, rel_res.x // 4, rel_res.y // 4
+                # Test capture of a quadrant-sized region offset into the screen
+                quad_region = Rect(
+                    screen.x // 4, screen.y // 4, screen.x // 4, screen.y // 4
                 )
-                rel_screenshot = await vnc.capture(rel_region)
-                self.assertEqual(len(rel_screenshot.shape), 3)
-                self.assertEqual(rel_screenshot.shape[2], 4)  # RGBA
+                quad_screenshot = await vnc.capture(quad_region)
+                self.assertEqual(len(quad_screenshot.shape), 3)
+                self.assertEqual(quad_screenshot.shape[2], 4)  # RGBA
+                self.assertEqual(quad_screenshot.shape[0], quad_region.height)
+                self.assertEqual(quad_screenshot.shape[1], quad_region.width)
 
                 # Test mouse operations with float-derived coordinates
                 center_x = 100.0

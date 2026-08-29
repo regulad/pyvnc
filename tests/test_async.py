@@ -70,7 +70,7 @@ class TestVNCIntegration(unittest.TestCase):
                 # Basic connection info
                 self.assertGreater(vnc.rect.width, 0)
                 self.assertGreater(vnc.rect.height, 0)
-                rel_res = vnc.rect
+                screen = Point(vnc.rect.width, vnc.rect.height)
 
                 # Test screenshots (background task handles updates)
                 full_screenshot = await vnc.capture()
@@ -85,17 +85,19 @@ class TestVNCIntegration(unittest.TestCase):
                 self.assertEqual(region_screenshot.shape[0], region.height)
                 self.assertEqual(region_screenshot.shape[1], region.width)
 
-                # Test relative coordinate capture
-                rel_region = Rect(
-                    rel_res.x // 4, rel_res.y // 4, rel_res.x // 4, rel_res.y // 4
+                # Test capture of a quadrant-sized region offset into the screen
+                quad_region = Rect(
+                    screen.x // 4, screen.y // 4, screen.x // 4, screen.y // 4
                 )
-                rel_screenshot = await vnc.capture(rel_region)
-                self.assertEqual(len(rel_screenshot.shape), 3)
-                self.assertEqual(rel_screenshot.shape[2], 4)  # RGBA
+                quad_screenshot = await vnc.capture(quad_region)
+                self.assertEqual(len(quad_screenshot.shape), 3)
+                self.assertEqual(quad_screenshot.shape[2], 4)  # RGBA
+                self.assertEqual(quad_screenshot.shape[0], quad_region.height)
+                self.assertEqual(quad_screenshot.shape[1], quad_region.width)
 
                 # Test mouse operations with float-derived coordinates
-                center_x = rel_res.x / 2.0
-                center_y = rel_res.y / 2.0
+                center_x = screen.x / 2.0
+                center_y = screen.y / 2.0
 
                 await vnc.move(Point(int(center_x), int(center_y)))
                 await vnc.click(MOUSE_BUTTON_LEFT)
@@ -108,8 +110,8 @@ class TestVNCIntegration(unittest.TestCase):
                 await vnc.scroll_down(2)
 
                 # Test click_at helpers
-                corner_x = rel_res.x / 10.0
-                corner_y = rel_res.y / 10.0
+                corner_x = screen.x / 10.0
+                corner_y = screen.y / 10.0
                 await vnc.click_at(
                     Point(int(corner_x), int(corner_y)), MOUSE_BUTTON_LEFT
                 )
@@ -118,10 +120,10 @@ class TestVNCIntegration(unittest.TestCase):
                 )
 
                 # Test drag operations with all mouse buttons
-                start_x = rel_res.x / 4.0
-                start_y = rel_res.y / 4.0
-                end_x = rel_res.x * 3.0 / 4.0
-                end_y = rel_res.y * 3.0 / 4.0
+                start_x = screen.x / 4.0
+                start_y = screen.y / 4.0
+                end_x = screen.x * 3.0 / 4.0
+                end_y = screen.y * 3.0 / 4.0
 
                 # Left button drag
                 await vnc.move(Point(int(start_x), int(start_y)))

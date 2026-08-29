@@ -40,9 +40,10 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDEs
+# IDEs and agent tooling
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~

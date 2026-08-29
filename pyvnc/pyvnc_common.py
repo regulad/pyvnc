@@ -24,6 +24,10 @@ VNC_PROTOCOL_HEADER = b"RFB 003.008\n"
 VNC_PROTOCOL_HEADER_SIZE = len(VNC_PROTOCOL_HEADER)
 VNC_PROTOCOL_PREFIX = b"RFB "
 
+# The only RFB version this client implements. RFC 6143 documents 3.8; earlier
+# versions (3.3, 3.7) use a different security handshake that we do not speak.
+VNC_PROTOCOL_VERSION = (3, 8)
+
 # Authentication types
 AUTH_TYPE_NONE = 1
 AUTH_TYPE_VNC = 2
@@ -34,9 +38,11 @@ AUTH_STATE_PERMITTED = 0
 AUTH_STATE_FAILED = 1
 AUTH_STATE_LOCKOUT = 2
 
-# VNC message types
+# VNC server -> client message types (RFC 6143 section 7.6)
 MSG_TYPE_FRAMEBUFFER_UPDATE = 0
-MSG_TYPE_CLIPBOARD = 2
+MSG_TYPE_SET_COLOUR_MAP_ENTRIES = 1
+MSG_TYPE_BELL = 2
+MSG_TYPE_SERVER_CUT_TEXT = 3
 
 # VNC encodings
 ENCODING_RAW = 0
@@ -200,11 +206,14 @@ __all__ = [
     "VNC_PROTOCOL_HEADER",
     "VNC_PROTOCOL_HEADER_SIZE",
     "VNC_PROTOCOL_PREFIX",
+    "VNC_PROTOCOL_VERSION",
     "AUTH_TYPE_NONE",
     "AUTH_TYPE_VNC",
     "AUTH_TYPE_APPLE",
     "MSG_TYPE_FRAMEBUFFER_UPDATE",
-    "MSG_TYPE_CLIPBOARD",
+    "MSG_TYPE_SET_COLOUR_MAP_ENTRIES",
+    "MSG_TYPE_BELL",
+    "MSG_TYPE_SERVER_CUT_TEXT",
     "ENCODING_RAW",
     "ENCODING_ZLIB",
     "MOUSE_BUTTON_LEFT",

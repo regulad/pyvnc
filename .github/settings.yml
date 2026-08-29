@@ -1,0 +1,13 @@
+# Repository settings managed by the Probot "Settings" app.
+# https://github.com/repository-settings/app
+#
+# Values here are the source of truth: the app applies this file on every push to
+# the default branch, overwriting changes made through the GitHub web UI.
+
+repository:
+  name: pyvnc
+  description: VNC interface library for Python
+  default_branch: main
+
+  # Comma-separated, per the Settings app's schema.
+  topics: anthropic, api, claude, gplv3, library, python, remote-control, remote-desktop, vnc

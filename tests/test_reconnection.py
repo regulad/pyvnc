@@ -250,8 +250,9 @@ class TestConnectionLifecycle(unittest.IsolatedAsyncioTestCase):
 
         await client.close()
 
-        # Should disable auto_reconnect
-        self.assertFalse(config.auto_reconnect)
+        # Should suppress auto-reconnect without mutating the caller's config
+        self.assertTrue(client._closing)
+        self.assertTrue(config.auto_reconnect)
         # Should stop running
         self.assertFalse(client._running)
         # Should disconnect

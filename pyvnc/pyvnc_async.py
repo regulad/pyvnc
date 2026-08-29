@@ -36,11 +36,14 @@ from .pyvnc_common import (
     VNC_PROTOCOL_HEADER,
     VNC_PROTOCOL_HEADER_SIZE,
     VNC_PROTOCOL_PREFIX,
+    VNC_PROTOCOL_VERSION,
     AUTH_TYPE_NONE,
     AUTH_TYPE_VNC,
     AUTH_TYPE_APPLE,
     MSG_TYPE_FRAMEBUFFER_UPDATE,
-    MSG_TYPE_CLIPBOARD,
+    MSG_TYPE_SET_COLOUR_MAP_ENTRIES,
+    MSG_TYPE_BELL,
+    MSG_TYPE_SERVER_CUT_TEXT,
     ENCODING_RAW,
     ENCODING_ZLIB,
     MOUSE_BUTTON_LEFT,
@@ -62,9 +65,31 @@ logger = logging.getLogger(__name__)
 
 
 RFC_6143_CANON_STRING_ENCODING = "latin-1"
-SUPPORTED_ENCODINGS = {
+# Ordered most-preferred first; raw is mandatory for every RFB server and acts as the
+# fallback the server drops back to when it cannot use zlib for a rectangle.
+SUPPORTED_ENCODINGS = (
     ENCODING_ZLIB,
-}
+    ENCODING_RAW,
+)
+
+# Requested via SetPixelFormat when the server's own format cannot be decoded.
+DEFAULT_PIXEL_FORMAT_NAME = "bgra"
+
+
+def _parse_protocol_version(intro: bytes) -> Optional[tuple[int, int]]:
+    """Parse an RFB ProtocolVersion string, e.g. ``b"RFB 003.008\n"``.
+
+    Returns ``(major, minor)``, or None if *intro* is not a well-formed handshake
+    (RFC 6143 section 7.1.1 fixes the layout at exactly 12 bytes).
+    """
+    if len(intro) != VNC_PROTOCOL_HEADER_SIZE or intro[:4] != VNC_PROTOCOL_PREFIX:
+        return None
+    if intro[7:8] != b"." or intro[11:12] != b"\n":
+        return None
+    try:
+        return int(intro[4:7]), int(intro[8:11])
+    except ValueError:
+        return None
 
 
 async def _read_bytes(reader: asyncio.StreamReader, length: int) -> bytes:
@@ -114,6 +139,7 @@ class VNCClient:
 
         # Reconnection state
         self._connected = False
+        self._closing = False
         self._reconnecting = False
         self._reconnect_event = asyncio.Event()
         self._reconnect_event.set()  # Initially not reconnecting
@@ -132,8 +158,18 @@ class VNCClient:
         assert self._reader is not None and self._writer is not None
 
         intro = await _read_bytes(self._reader, VNC_PROTOCOL_HEADER_SIZE)
-        if intro[:4] != VNC_PROTOCOL_PREFIX:
-            raise ValueError("not a VNC server")
+        server_version = _parse_protocol_version(intro)
+        if server_version is None:
+            raise ValueError(f"not a VNC server (bad ProtocolVersion {intro!r})")
+        # RFC 6143 section 7.1.1: "A client should never request a protocol version
+        # higher than that offered by the server." We only implement 3.8, so if the
+        # server offers less there is no version we can legally request.
+        if server_version < VNC_PROTOCOL_VERSION:
+            raise NotImplementedError(
+                f"server offers RFB {server_version[0]}.{server_version[1]}, but this "
+                f"client only implements RFB "
+                f"{VNC_PROTOCOL_VERSION[0]}.{VNC_PROTOCOL_VERSION[1]}"
+            )
         self._writer.write(VNC_PROTOCOL_HEADER)
         await self._writer.drain()
 
@@ -144,11 +180,26 @@ class VNCClient:
         if not auth_types:
             reason = await _read_bytes(self._reader, await _read_int(self._reader, 4))
             raise ValueError(reason.decode("utf8"))
-        for auth_type in (AUTH_TYPE_NONE, AUTH_TYPE_VNC, AUTH_TYPE_APPLE):
-            if auth_type in auth_types:
+        # Prefer the strongest authentication the server offers, falling back to
+        # unauthenticated access only when nothing better is on the table. Types we
+        # lack credentials for are skipped rather than selected and then failed:
+        # picking Apple auth without a username would abort a handshake that could
+        # still have succeeded over VNC auth.
+        usable = {
+            AUTH_TYPE_APPLE: self._config.username is not None
+            and self._config.password is not None,
+            AUTH_TYPE_VNC: self._config.password is not None,
+            AUTH_TYPE_NONE: True,
+        }
+        for auth_type in (AUTH_TYPE_APPLE, AUTH_TYPE_VNC, AUTH_TYPE_NONE):
+            if auth_type in auth_types and usable[auth_type]:
                 break
         else:
-            raise ValueError(f"unsupported VNC auth types: {auth_types}")
+            raise ValueError(
+                f"no usable VNC auth type: server offered {sorted(auth_types)} "
+                f"(Apple auth needs a username and password, "
+                f"VNC auth needs a password)"
+            )
 
         # Authentication routines are taken from https://github.com/barneygale/pytest-vnc/blob/main/pytest_vnc.py
 
@@ -207,14 +258,18 @@ class VNCClient:
 
         # Check auth result
         auth_result = await _read_int(self._reader, 4)
-        if auth_result == AUTH_STATE_PERMITTED:
-            pass
-        elif auth_result == AUTH_STATE_FAILED:
-            raise PermissionError("VNC auth failed (retry permitted)")
-        elif auth_result == AUTH_STATE_LOCKOUT:
-            raise PermissionError("VNC auth failed (too many attempts)")
-        else:
-            raise PermissionError(f"VNC auth failed (unknown reason {auth_result})")
+        if auth_result != AUTH_STATE_PERMITTED:
+            # RFC 6143 section 7.1.3: in 3.8 the server follows a failed
+            # SecurityResult with a reason string, then closes the connection.
+            detail = await self._read_failure_reason()
+            if auth_result == AUTH_STATE_FAILED:
+                raise PermissionError(f"VNC auth failed (retry permitted){detail}")
+            elif auth_result == AUTH_STATE_LOCKOUT:
+                raise PermissionError(f"VNC auth failed (too many attempts){detail}")
+            else:
+                raise PermissionError(
+                    f"VNC auth failed (unknown reason {auth_result}){detail}"
+                )
 
         # Negotiate pixel format and encodings
         # https://datatracker.ietf.org/doc/html/rfc6143#section-7.3.1
@@ -232,23 +287,106 @@ class VNCClient:
         # at this point in time, the connection is live
         self.rect = Rect(0, 0, framebuffer_width, framebuffer_height)
 
-        # some servers, like VMw, ignore sent pixel formats, so if it's possible to use the one that has been sent to us we will use it
-        if not self.pixel_format.true_color_flag:
-            raise NotImplementedError("Pallet encoding is not supported")
-        elif (self.pixel_format.bits_per_pixel != 32) or (
-            self.pixel_format.depth != 24
-        ):
-            raise NotImplementedError("Non-32bpp servers are not supported")
-        elif (
-            (self.pixel_format.blue_max != 255)
-            or (self.pixel_format.red_max != 255)
-            or (self.pixel_format.green_max != 255)
-        ):
-            raise NotImplementedError("Only 8bit color is support")
-        elif self.pixel_format.big_endian_flag:
-            raise NotImplementedError("Only little-endian pixel colors are supported.")
+        # some servers, like VMw, ignore sent pixel formats, so if it's possible to
+        # use the one that has been sent to us we will use it. Otherwise we ask the
+        # server to switch to a format we do understand (SetPixelFormat), which the
+        # RFC requires servers to honour.
+        unsupported = self._describe_unsupported(self.pixel_format)
+        if unsupported is not None:
+            logger.info(
+                f"Server pixel format is unusable ({unsupported}); "
+                f"requesting {DEFAULT_PIXEL_FORMAT_NAME!r} via SetPixelFormat"
+            )
+            await self._set_pixel_format(PIXEL_FORMATS[DEFAULT_PIXEL_FORMAT_NAME])
+            still_unsupported = self._describe_unsupported(self.pixel_format)
+            if still_unsupported is not None:
+                raise NotImplementedError(
+                    f"Cannot negotiate a usable pixel format with this server: "
+                    f"{still_unsupported}"
+                )
+
+        # The zlib encoding uses a single stream for the lifetime of a connection, so
+        # the decompressor must be recreated for every (re)connection.
+        self._zlib_decompress = decompressobj().decompress
 
         await self._set_encodings(*SUPPORTED_ENCODINGS)
+
+    async def _read_failure_reason(self) -> str:
+        """Read the reason string that RFB 3.8 sends after a failed SecurityResult.
+
+        Returns a pre-formatted ``": <reason>"`` suffix, or an empty string if the
+        server closed the connection or sent nothing readable.
+        """
+        if self._reader is None:
+            return ""
+        try:
+            reason = await asyncio.wait_for(
+                _read_bytes(self._reader, await _read_int(self._reader, 4)),
+                timeout=2.0,
+            )
+        except (ConnectionError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+            return ""
+        text = reason.decode(RFC_6143_CANON_STRING_ENCODING).strip()
+        return f": {text}" if text else ""
+
+    @staticmethod
+    def _describe_unsupported(pixel_format: PixelFormat) -> Optional[str]:
+        """Return a reason string if *pixel_format* cannot be decoded, else None."""
+        if not pixel_format.true_color_flag:
+            return "palette (non true-colour) encoding is not supported"
+        if pixel_format.bits_per_pixel != 32:
+            return (
+                f"only 32 bits-per-pixel is supported, server offered "
+                f"{pixel_format.bits_per_pixel}"
+            )
+        # depth 24 (xRGB) and depth 32 (ARGB/RGBA) both give 8 bits per channel in a
+        # 32-bit word; both are decodable with the same channel-shift arithmetic.
+        if pixel_format.depth not in (24, 32):
+            return (
+                f"only colour depths 24 and 32 are supported, server offered "
+                f"{pixel_format.depth}"
+            )
+        if (
+            pixel_format.red_max != 255
+            or pixel_format.green_max != 255
+            or pixel_format.blue_max != 255
+        ):
+            return (
+                f"only 8 bits per colour channel is supported, server offered maxima "
+                f"({pixel_format.red_max}, {pixel_format.green_max}, "
+                f"{pixel_format.blue_max})"
+            )
+        if pixel_format.big_endian_flag:
+            return "only little-endian pixel colours are supported"
+        if (
+            len(
+                {
+                    pixel_format.red_shift,
+                    pixel_format.green_shift,
+                    pixel_format.blue_shift,
+                }
+            )
+            != 3
+        ):
+            return (
+                f"overlapping colour channel shifts "
+                f"({pixel_format.red_shift}, {pixel_format.green_shift}, "
+                f"{pixel_format.blue_shift})"
+            )
+        if any(
+            shift not in (0, 8, 16, 24)
+            for shift in (
+                pixel_format.red_shift,
+                pixel_format.green_shift,
+                pixel_format.blue_shift,
+            )
+        ):
+            return (
+                f"colour channel shifts must be byte-aligned, server offered "
+                f"({pixel_format.red_shift}, {pixel_format.green_shift}, "
+                f"{pixel_format.blue_shift})"
+            )
+        return None
 
     @classmethod
     async def connect(cls, config: VNCConfig) -> "VNCClient":
@@ -276,6 +414,11 @@ class VNCClient:
                 await client._perform_handshake()
                 client._connected = True
                 break
+            except PermissionError:
+                # PermissionError is a subclass of OSError, so it must be re-raised
+                # before the retry branch below. Retrying a rejected password just
+                # buries the server's reason behind a generic connection error.
+                raise
             except (OSError, ConnectionError, asyncio.TimeoutError) as e:
                 last_error = e
                 logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
@@ -347,12 +490,20 @@ class VNCClient:
         self._reconnecting = True
         self._reconnect_event.clear()
 
+        # A reconnect triggered by a read failure runs *inside* the listener task
+        # itself. In that case we must not cancel or replace the listener: cancelling
+        # the current task is silently absorbed by the CancelledError handler below,
+        # and spawning a replacement would leave two tasks reading the same socket,
+        # stealing each other's bytes. The calling listener simply carries on with
+        # the new reader once the handshake succeeds.
+        from_listener = asyncio.current_task() is self._listener_task
+
         try:
             # Clean up old connection
             await self._cleanup_connection()
 
-            # Cancel old listener task
-            if self._listener_task:
+            # Cancel old listener task (unless we *are* it)
+            if self._listener_task is not None and not from_listener:
                 self._listener_task.cancel()
                 try:
                     await self._listener_task
@@ -373,20 +524,33 @@ class VNCClient:
                     self._connected = True
                     self._last_error = None
 
-                    # Restart the listener task
-                    self._listener_task = asyncio.create_task(
-                        self._framebuffer_listener(), name="vnc_frame_listener"
-                    )
+                    # Restart the listener task, unless the caller is the listener
+                    # itself, which will resume reading from the new connection.
+                    if not from_listener:
+                        self._listener_task = asyncio.create_task(
+                            self._framebuffer_listener(), name="vnc_frame_listener"
+                        )
 
                     # Reset framebuffer since dimensions may have changed
                     self._pixels_rgba = None
 
-                    # Restore mouse position on reconnect
-                    await self.move(self._mouse_position)
+                    # Restore mouse position on reconnect. This must bypass
+                    # _safe_write: we still hold the reconnect flag, and _safe_write
+                    # would block waiting for this very reconnect to finish.
+                    await self._write_direct(self._pointer_event())
 
                     logger.info("VNC reconnection successful")
                     return True
 
+                except PermissionError as e:
+                    # PermissionError subclasses OSError, so it must be handled
+                    # before the retry branch below. Credentials that were rejected
+                    # once will be rejected again; retrying only buries the server's
+                    # reason behind a generic connection error.
+                    logger.error(f"Reconnection rejected by server: {e}")
+                    self._last_error = e
+                    self._running = False
+                    return False
                 except (OSError, ConnectionError, asyncio.TimeoutError) as e:
                     last_error = e
                     logger.warning(f"Reconnection attempt {attempt + 1} failed: {e}")
@@ -414,7 +578,7 @@ class VNCClient:
     async def close(self) -> None:
         """Close the VNC connection and stop background task."""
         self._running = False
-        self._config.auto_reconnect = False  # Prevent auto-reconnect on close
+        self._closing = True  # Prevent auto-reconnect on close
 
         if self._listener_task:
             self._listener_task.cancel()
@@ -447,16 +611,36 @@ class VNCClient:
                     raise ConnectionError("Reader is None")
                 update_type = await _read_int(self._reader, 1)
 
-                if update_type == MSG_TYPE_CLIPBOARD:
-                    # Skip clipboard data - not implementing clipboard sync
-                    await _read_bytes(self._reader, await _read_int(self._reader, 4))
-
-                elif update_type == MSG_TYPE_FRAMEBUFFER_UPDATE:
+                if update_type == MSG_TYPE_FRAMEBUFFER_UPDATE:
                     await self._handle_framebuffer_update()
 
+                elif update_type == MSG_TYPE_SERVER_CUT_TEXT:
+                    # RFC 6143 section 7.6.4: padding(3), length(4), text. We do not
+                    # implement clipboard sync, but the payload must still be drained
+                    # in full or the stream desynchronises.
+                    await _read_bytes(self._reader, 3)  # padding
+                    await _read_bytes(self._reader, await _read_int(self._reader, 4))
+
+                elif update_type == MSG_TYPE_BELL:
+                    # RFC 6143 section 7.6.3: a bare message type, no payload.
+                    logger.debug("Server rang the bell")
+
+                elif update_type == MSG_TYPE_SET_COLOUR_MAP_ENTRIES:
+                    # We always negotiate true colour, so a colour map is unexpected,
+                    # but it is length-prefixed and therefore safe to skip.
+                    await _read_bytes(self._reader, 3)  # padding + first colour
+                    num_colours = await _read_int(self._reader, 2)
+                    await _read_bytes(self._reader, num_colours * 6)
+                    logger.warning("Ignoring SetColourMapEntries from server")
+
                 else:
-                    # Unknown message type - log and skip to avoid blocking
-                    logger.warning(f"Unknown VNC message type: {update_type}, skipping")
+                    # An unrecognised message has no length prefix, so we cannot skip
+                    # it: anything further we read would be misaligned garbage. Drop
+                    # the connection instead of silently corrupting the framebuffer.
+                    raise ConnectionError(
+                        f"Unknown VNC server message type {update_type}; "
+                        f"stream is desynchronised"
+                    )
 
             except asyncio.CancelledError:
                 break
@@ -465,7 +649,7 @@ class VNCClient:
                 logger.warning("Connection lost, attempting to reconnect...")
                 self._connected = False
 
-                if self._config.auto_reconnect:
+                if self._config.auto_reconnect and not self._closing:
                     success = await self._reconnect()
                     if not success:
                         # Reconnection failed, stop the listener
@@ -476,9 +660,17 @@ class VNCClient:
                     logger.info("Auto-reconnect disabled, closing connection")
                     break
             except Exception:
-                # Log and continue
+                # An unexpected decode error leaves us at an unknown offset in the
+                # stream, so continuing would spin on the same corrupt data. Tear the
+                # connection down and let the reconnect path resynchronise it.
                 logger.exception("Error in framebuffer listener")
-                continue
+                self._connected = False
+                await self._cleanup_connection()
+                if self._config.auto_reconnect and not self._closing:
+                    if not await self._reconnect():
+                        break
+                else:
+                    break
 
     async def _handle_framebuffer_update(self) -> None:
         """Process a framebuffer update message from the server."""
@@ -502,7 +694,22 @@ class VNCClient:
                     await _read_int(self._reader, 2),
                     await _read_int(self._reader, 2),
                 )
-                area_encoding = await _read_int(self._reader, 4)
+                # RFC 6143 section 7.6.1: every rectangle lies inside the
+                # framebuffer. A server that violates this would otherwise write
+                # through a silently clipped numpy slice and corrupt the frame.
+                if (
+                    area_rect.x + area_rect.width > self.rect.width
+                    or area_rect.y + area_rect.height > self.rect.height
+                ):
+                    raise ConnectionError(
+                        f"Server sent rectangle {area_rect} outside the "
+                        f"{self.rect.width}x{self.rect.height} framebuffer"
+                    )
+
+                # Encoding numbers are signed: pseudo-encodings are negative.
+                area_encoding = int.from_bytes(
+                    await _read_bytes(self._reader, 4), "big", signed=True
+                )
 
                 if area_encoding == ENCODING_RAW:
                     area = await _read_bytes(
@@ -514,11 +721,13 @@ class VNCClient:
                     )
                     area = self._zlib_decompress(compressed)
                 else:
-                    # Skip unsupported encoding
-                    logger.warning(
-                        f"Unsupported VNC encoding: {area_encoding}, skipping rectangle"
+                    # Rectangle payloads are not self-delimiting, so an encoding we
+                    # cannot parse means we no longer know where the next rectangle
+                    # starts. Only encodings we advertised should ever arrive here.
+                    raise ConnectionError(
+                        f"Server used unnegotiated VNC encoding {area_encoding}; "
+                        f"stream is desynchronised"
                     )
-                    continue
 
                 area_pixels_native = np.ndarray(
                     (area_rect.height, area_rect.width, 4), "B", area
@@ -556,7 +765,7 @@ class VNCClient:
             await self._reconnect_event.wait()
 
         if self._writer is None or not self._connected:
-            if self._config.auto_reconnect and self._running:
+            if self._config.auto_reconnect and self._running and not self._closing:
                 success = await self._reconnect()
                 if not success:
                     return False
@@ -571,7 +780,7 @@ class VNCClient:
         except (ConnectionError, OSError) as e:
             logger.warning(f"Write failed: {e}")
             self._connected = False
-            if self._config.auto_reconnect and self._running:
+            if self._config.auto_reconnect and self._running and not self._closing:
                 success = await self._reconnect()
                 if success and self._writer is not None:
                     # Retry the write after reconnection
@@ -580,16 +789,33 @@ class VNCClient:
                     return True
             return False
 
+    async def _write_direct(self, data: bytes) -> None:
+        """Write straight to the current stream, bypassing reconnection handling.
+
+        Used for messages sent during the handshake, before the connection has been
+        marked live. Going through :meth:`_safe_write` there would either drop the
+        message (initial connect, where ``_running`` is still False) or deadlock
+        (reconnect, where ``_safe_write`` waits on the very reconnect it is part of).
+        """
+        if self._writer is None:
+            raise ConnectionError("Not connected")
+        self._writer.write(data)
+        await self._writer.drain()
+
     async def _set_pixel_format(self, new_pixel_format: PixelFormat) -> None:
-        await self._safe_write(b"\x00" + b"\x00\x00\x00" + new_pixel_format.serialize())
+        await self._write_direct(
+            b"\x00" + b"\x00\x00\x00" + new_pixel_format.serialize()
+        )
         self.pixel_format = new_pixel_format
 
     # 2
     async def _set_encodings(self, *encodings: int) -> None:
-        await self._safe_write(
+        await self._write_direct(
             b"\x02\x00"
             + len(encodings).to_bytes(2, "big")
-            + b"".join(encoding.to_bytes(4, "big") for encoding in encodings)
+            + b"".join(
+                encoding.to_bytes(4, "big", signed=True) for encoding in encodings
+            )
         )
 
     # 3
@@ -635,7 +861,7 @@ class VNCClient:
             await self._reconnect_event.wait()
 
         if not self._connected:
-            if self._config.auto_reconnect and self._running:
+            if self._config.auto_reconnect and self._running and not self._closing:
                 success = await self._reconnect()
                 if not success:
                     raise ConnectionError("Connection down and reconnection failed")
@@ -652,6 +878,12 @@ class VNCClient:
         # Ensure we have a valid target rect
         assert isinstance(target_rect, Rect)
 
+        # Clear the event *before* asking for an update: a fast server can deliver
+        # the reply before we get back here, and clearing afterwards would discard
+        # that notification and make us wait for the following update instead.
+        if wait:
+            self._capture_event.clear()
+
         # Request update from server
         success = await self._framebuffer_update_request(target_rect)
         if not success:
@@ -660,8 +892,6 @@ class VNCClient:
             )
 
         if wait:
-            # Clear event and wait for update
-            self._capture_event.clear()
             try:
                 await asyncio.wait_for(self._capture_event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
@@ -686,13 +916,17 @@ class VNCClient:
         finally:
             await self._safe_write(b"\x04\x00\x00\x00" + data)
 
-    async def _write_mouse(self) -> None:
-        await self._safe_write(
+    def _pointer_event(self) -> bytes:
+        # Serialise the current pointer state as an RFB PointerEvent message.
+        return (
             b"\x05"
             + self._mouse_buttons.to_bytes(1, "big")
-            + self._mouse_position.x.to_bytes(2, "big")
-            + self._mouse_position.y.to_bytes(2, "big")
+            + int(self._mouse_position.x).to_bytes(2, "big")
+            + int(self._mouse_position.y).to_bytes(2, "big")
         )
+
+    async def _write_mouse(self) -> None:
+        await self._safe_write(self._pointer_event())
 
     @asynccontextmanager
     async def hold_key(self, *keys: str) -> AsyncIterator["VNCClient"]:

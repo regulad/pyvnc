@@ -47,13 +47,10 @@ Quick Start::
 
     asyncio.run(main())
 
-Relative Coordinates:
-    pyvnc provides a resolution-independent coordinate system:
-    - Automatically scales to maintain aspect ratio close to actual screen
-    - Both width and height are multiples of 100 (easy mental math)
-    - Maximum dimensions are 99900 (for any aspect ratio)
-    - Use relative=True parameter in mouse/capture methods
-    - Get dimensions with vnc.get_relative_resolution()
+Coordinates:
+    All coordinates are absolute pixels in the server's framebuffer. Read the
+    framebuffer size from ``vnc.rect`` (a ``Rect`` whose ``x``/``y`` are always 0)
+    and scale your own values against ``vnc.rect.width`` / ``vnc.rect.height``.
 
 Mouse Button Constants:
     Use these constants instead of raw numbers:
@@ -84,7 +81,7 @@ from .pyvnc_common import (
 )
 from .pyvnc_async import VNCClient
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 __all__ = [
     "MOUSE_BUTTON_LEFT",
